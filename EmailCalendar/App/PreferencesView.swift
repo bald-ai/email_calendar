@@ -31,8 +31,14 @@ struct PreferencesView: View {
                 Text("Remote email images stay blocked until you allow them for a sender.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("Google account") {
-                if store.isSignedIn {
+            Section(store.isDemoMode ? "Demo data" : "Google account") {
+                if store.isDemoMode {
+                    LabeledContent("Mailbox", value: store.accountEmail)
+                    Text("Running on built-in demo mail and calendars. Changes are saved on this Mac. Add a Google client ID to Config/Secrets.xcconfig to connect your real account.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Simulate incoming email") { Task { await store.simulateIncomingMail() } }
+                    Button("Reset demo data…", role: .destructive) { store.resetDemoData() }
+                } else if store.isSignedIn {
                     LabeledContent("Connected", value: store.accountEmail)
                     Button("Sign out") { Task { await store.signOut() } }
                 } else {

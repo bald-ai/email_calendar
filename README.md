@@ -2,13 +2,24 @@
 
 A native macOS 15+ app written in Swift 6, SwiftUI and AppKit. Mail is backed by Gmail, calendars by Google Calendar, and the local cache by SQLite. The week overlay opens from cached data with **⌥Space**: tap to toggle, hold to peek.
 
-## Run on your Mac
+## Run on your Mac (demo data, no Google account)
 
 1. Install **Xcode 16 or later** and open `EmailCalendar.xcodeproj`.
-2. Create a Google Cloud project, enable the **Gmail API** and **Google Calendar API**, and configure an external OAuth consent screen in **Testing**. Add your own Google address as a test user.
-3. Create an OAuth client with application type **Desktop app**. Copy `Config/Secrets.example.xcconfig` to `Config/Secrets.xcconfig`, and fill in its client ID and client secret. The app uses an ephemeral localhost redirect with PKCE; do not create a Web application client.
-4. Select the **EmailCalendar** scheme, choose your signing team in **Signing & Capabilities**, and run. Xcode resolves the sole package dependency, [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts).
-5. Sign in from the welcome screen. The first mail sync scans all sent-message recipients to seed your approved senders, so a large account can take a while. Calendar sync runs independently. Subsequent syncs use Gmail history and Calendar sync tokens.
+2. Select the **EmailCalendar** scheme and run. With no Google client ID configured, the app starts in **demo mode**.
+
+Demo mode runs the real mail and calendar code against a fake Gmail and Google Calendar inside the app (`EmailCalendar/Google/MockGoogle`). It comes with a seeded mailbox, four calendars with recurring events, invitations, and an event about 35 minutes after first launch, so the overlay's "Next" line has something to show. Everything works: Screener and its filters, Set Aside, Bubble Up, drafts, sending, search, and creating, editing and RSVPing events. Changes are saved to `~/Library/Containers/ai.bald.EmailCalendar/Data/Library/Application Support/EmailCalendar/Mock/`.
+
+- A few unknown senders arrive after the first sync, so the Screener has something in it.
+- **File → Simulate Incoming Email** (⇧⌘M), the menu bar icon, or Preferences delivers another email. Screened-out senders' new mail is caught by their filter.
+- **Preferences → Reset demo data** starts over with fresh data, dated relative to today.
+- Force a mode with the `EC_MOCK=1` or `EC_MOCK=0` environment variable in the scheme.
+
+## Connect your Google account (later)
+
+1. Create a Google Cloud project, enable the **Gmail API** and **Google Calendar API**, and configure an external OAuth consent screen in **Testing**. Add your own Google address as a test user.
+2. Create an OAuth client with application type **Desktop app**. Copy `Config/Secrets.example.xcconfig` to `Config/Secrets.xcconfig`, and fill in its client ID and client secret. The app uses an ephemeral localhost redirect with PKCE; do not create a Web application client.
+3. Choose your signing team in **Signing & Capabilities**, and run. Xcode resolves the sole package dependency, [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts).
+4. Sign in from the welcome screen. The first mail sync scans all sent-message recipients to seed your approved senders, so a large account can take a while. Calendar sync runs independently. Subsequent syncs use Gmail history and Calendar sync tokens.
 
 The requested scopes are `gmail.modify`, `gmail.settings.basic`, and `calendar`. Tokens are saved in Keychain. OAuth credentials are build settings from the ignored `Secrets.xcconfig`; they are never stored in the mail database.
 

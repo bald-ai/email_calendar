@@ -29,12 +29,19 @@ struct EmailCalendarApp: App {
                 Button("Show Week Overlay") { overlay.toggle() }
                 Button("Refresh") { Task { await store.refresh() } }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
+                if store.isDemoMode {
+                    Button("Simulate Incoming Email") { Task { await store.simulateIncomingMail() } }
+                        .keyboardShortcut("m", modifiers: [.command, .shift])
+                }
             }
         }
 
         MenuBarExtra("Email + Calendar", systemImage: "calendar") {
             Button("Show Week") { overlay.toggle() }
             Button("Open Email + Calendar") { store.openMainWindow() }
+            if store.isDemoMode {
+                Button("Simulate Incoming Email") { Task { await store.simulateIncomingMail() } }
+            }
             Divider()
             SettingsLink { Text("Preferences…") }
             Divider()

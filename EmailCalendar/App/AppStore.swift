@@ -40,6 +40,10 @@ final class AppStore {
     var isSignedIn: Bool { account != nil }
 
     @ObservationIgnored let auth: GoogleAuth
+    /// Demo mode runs the real services against an in-process fake Google. It is on until a
+    /// Google client ID is configured, or can be forced with the EC_MOCK=1/0 environment variable.
+    let isDemoMode: Bool
+    @ObservationIgnored private let mockBackend: MockGoogleBackend?
     @ObservationIgnored private let database: LocalStore?
     @ObservationIgnored private let mail: MailService?
     @ObservationIgnored private let calendarService: CalendarService?
@@ -58,9 +62,29 @@ final class AppStore {
         overlayHeight = defaults.object(forKey: "overlayHeight") as? Double ?? 0.25
         bubbleNotifications = defaults.object(forKey: "bubbleNotifications") as? Bool ?? true
         launchAtLogin = defaults.object(forKey: "launchAtLogin") as? Bool ?? true
+        let forced = ProcessInfo.processInfo.environment["EC_MOCK"]
+        isDemoMode = forced.map { $0 == "1" } ?? ((try? GoogleOAuthConfiguration.fromBundle()) == nil)
         do {
-            let local = try LocalStore()
-            let api = GoogleAPI(auth: auth)
+            let local: LocalStore
+            let api: GoogleAPI
+            if isDemoMode {
+                let mockFile = MockGoogleBackend.defaultFileURL()
+                let cacheFile = mockFile?.deletingLastPathComponent().appendingPathComponent("cache.sqlite")
+                if defaults.bool(forKey: "resetDemoDataOnLaunch"), let mockFile, let cacheFile {
+                    defaults.removeObject(forKey: "resetDemoDataOnLaunch")
+                    for file in [mockFile, cacheFile] {
+                        for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: file.path + suffix) }
+                    }
+                }
+                let backend = MockGoogleBackend(fileURL: mockFile)
+                mockBackend = backend
+                local = try LocalStore(url: cacheFile)
+                api = GoogleAPI(auth: MockTokenProvider(), session: MockGoogleURLProtocol.session(backend: backend))
+            } else {
+                mockBackend = nil
+                local = try LocalStore()
+                api = GoogleAPI(auth: auth)
+            }
             database = local
             mail = MailService(api: api, store: local)
             calendarService = CalendarService(api: api, store: local)
@@ -70,12 +94,35 @@ final class AppStore {
         }
     }
 
+    static let demoAccount = Account(id: MockGoogleBackend.accountEmail, email: MockGoogleBackend.accountEmail,
+                                     displayName: MockGoogleBackend.accountName)
+
+    /// Demo mode: drop a new email into the fake inbox, as if it just arrived.
+    func simulateIncomingMail() async {
+        guard let mockBackend else { return }
+        mockBackend.simulateIncomingMail()
+        await refresh()
+    }
+
+    /// Demo mode: start over with fresh seed data, relative to today.
+    func resetDemoData() {
+        guard isDemoMode else { return }
+        UserDefaults.standard.set(true, forKey: "resetDemoDataOnLaunch")
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        let bundle = Bundle.main.bundleURL
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSWorkspace.shared.openApplication(at: bundle, configuration: configuration)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { NSApp.terminate(nil) }
+    }
+
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
-        account = auth.account
-        if let error = auth.restorationError { errorMessage = error }
-        if account == nil, auth.isSignedIn, let database {
+        account = isDemoMode ? Self.demoAccount : auth.account
+        if !isDemoMode, let error = auth.restorationError { errorMessage = error }
+        if !isDemoMode, account == nil, auth.isSignedIn, let database {
             do { account = try await database.metadata(Account.self, key: "activeAccount", accountID: "app") }
             catch { reportError(error) }
         }
@@ -96,7 +143,7 @@ final class AppStore {
     }
 
     func signIn() async {
-        guard !isSigningIn else { return }
+        guard !isSigningIn, !isDemoMode else { return }
         isSigningIn = true
         do {
             account = try await auth.signIn()
@@ -111,7 +158,7 @@ final class AppStore {
     }
 
     func signOut() async {
-        guard !isSigningIn else { return }
+        guard !isSigningIn, !isDemoMode else { return }
         isSigningIn = true
         defer { isSigningIn = false }
         // Stop new UI and polling work before draining operations tied to these credentials.
@@ -334,7 +381,7 @@ final class AppStore {
     func reportError(_ error: any Error) {
         if error is CancellationError { return }
         errorMessage = error.localizedDescription
-        if account != nil && !auth.isSignedIn {
+        if !isDemoMode && account != nil && !auth.isSignedIn {
             account = nil; threads = []; cachedThreads = []; calendars = []; events = []
             senderRules = []; remoteImageSenders = []; selectedThreadID = nil
         }

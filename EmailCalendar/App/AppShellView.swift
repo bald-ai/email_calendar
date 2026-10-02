@@ -29,7 +29,7 @@ struct AppShellView: View {
                 Spacer(minLength: 0)
                 HStack(spacing: 8) {
                     Image(systemName: store.isSignedIn ? "person.crop.circle" : "person.crop.circle.badge.plus")
-                    Text(store.accountEmail.isEmpty ? "Your Google account" : store.accountEmail)
+                    Text(store.accountEmail.isEmpty ? "Your Google account" : (store.isDemoMode ? "Demo · " : "") + store.accountEmail)
                         .lineLimit(1).font(.caption).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                     SettingsLink { Image(systemName: "gearshape") }
