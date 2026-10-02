@@ -21,3 +21,8 @@ build/
 .idea/
 .vscode/
 *.log
+
+# Xcode secrets / build
+Secrets.xcconfig
+DerivedData/
+xcuserdata/
