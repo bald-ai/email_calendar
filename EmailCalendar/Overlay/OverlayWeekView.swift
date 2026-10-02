@@ -182,10 +182,10 @@ private struct HorizontalWeekSwipe: NSViewRepresentable {
             if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
             guard window != nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                MainActor.assumeIsolated {
-                    guard let self else { return event }
-                    return self.handle(event)
-                }
+                // Local monitors run on the main thread; NSEvent just isn't marked Sendable.
+                nonisolated(unsafe) let event = event
+                let swallow = MainActor.assumeIsolated { self?.handle(event) == nil }
+                return swallow ? nil : event
             }
         }
 

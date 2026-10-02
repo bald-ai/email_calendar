@@ -51,7 +51,7 @@ for scope in ["project", "target"]:
         if scope == "target":
             settings.update({"CODE_SIGN_STYLE": "Automatic", "COMBINE_HIDPI_IMAGES": "YES", "LD_RUNPATH_SEARCH_PATHS": "$(inherited) @executable_path/../Frameworks"})
         if config == "Debug":
-            settings.update({"SWIFT_OPTIMIZATION_LEVEL": "-Onone", "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG $(inherited)", "DEBUG_INFORMATION_FORMAT": "dwarf"})
+            settings.update({"SWIFT_OPTIMIZATION_LEVEL": "-Onone", "ONLY_ACTIVE_ARCH": "YES", "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG $(inherited)", "DEBUG_INFORMATION_FORMAT": "dwarf"})
         else:
             settings.update({"SWIFT_OPTIMIZATION_LEVEL": "-O", "DEBUG_INFORMATION_FORMAT": "dwarf-with-dsym"})
         base = f"baseConfigurationReference = {identifier('configFile')};" if scope == "target" else ""

@@ -404,7 +404,9 @@ final class AppStore {
     }
     private func configureLoginItem() async {
         do {
-            if launchAtLogin && SMAppService.mainApp.status == .notRegistered { try SMAppService.mainApp.register() }
+            // Debug builds in DerivedData would otherwise register themselves as login items.
+            let installed = Bundle.main.bundlePath.hasPrefix("/Applications/")
+            if launchAtLogin && installed && SMAppService.mainApp.status == .notRegistered { try SMAppService.mainApp.register() }
             else if !launchAtLogin && SMAppService.mainApp.status != .notRegistered { try await SMAppService.mainApp.unregister() }
         } catch { reportError(error) }
     }

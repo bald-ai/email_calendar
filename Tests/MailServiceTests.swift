@@ -40,6 +40,7 @@ private final class MailTestURLProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        let request = self.request.withMaterializedBody()
         let token = (request.value(forHTTPHeaderField: "Authorization") ?? "").replacingOccurrences(of: "Bearer ", with: "")
         guard let server = Self.registry.server(token: token), let url = request.url else {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL)); return
@@ -244,8 +245,22 @@ final class MailServiceTests: XCTestCase, @unchecked Sendable {
         return (MailService(api: api, store: store), store, server, Account(id: "owner@example.com", email: "owner@example.com"))
     }
 
-    func testSeedPagesAllSentRecipientsBeforeScreeningUnknownSender() async throws {
+    /// Treat the fixture's Inbox as mail arriving after setup, so the Screener applies to it.
+    private func markInboxSeeded(_ store: LocalStore, _ account: Account) async throws {
+        try await store.setMetadata(true, key: "inboxSendersSeeded", accountID: account.id)
+    }
+
+    func testFirstSyncApprovesExistingInboxSendersInsteadOfScreeningThem() async throws {
         let (service, _, server, account) = try fixture()
+        let snapshot = try await service.sync(account: account)
+        XCTAssertTrue(server.labels(messageID: "unknown").contains("INBOX"))
+        XCTAssertFalse(server.labels(messageID: "unknown").contains("screen"))
+        XCTAssertTrue(snapshot.rules.contains { $0.decision == .approved && !$0.key.hasSuffix("example.org") })
+    }
+
+    func testSeedPagesAllSentRecipientsBeforeScreeningUnknownSender() async throws {
+        let (service, store, server, account) = try fixture()
+        try await markInboxSeeded(store, account)
         let snapshot = try await service.sync(account: account)
         XCTAssertEqual(server.requestedSentTokens, ["first", "second"])
         XCTAssertEqual(snapshot.rules.first(where: { $0.key == "older@example.org" })?.decision, .approved)
@@ -432,7 +447,8 @@ final class MailServiceTests: XCTestCase, @unchecked Sendable {
     }
 
     func testLoadingImagesDoesNotApproveUnknownSender() async throws {
-        let (service, _, _, account) = try fixture()
+        let (service, store, _, account) = try fixture()
+        try await markInboxSeeded(store, account)
         _ = try await service.sync(account: account)
         try await service.setRemoteImages(sender: "new@example.net", allowed: true, account: account)
         let snapshot = try await service.cached(accountID: account.id)

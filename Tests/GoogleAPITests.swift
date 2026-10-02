@@ -178,6 +178,7 @@ private final class MockGoogleURLProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        let request = self.request.withMaterializedBody()
         guard let authorization = request.value(forHTTPHeaderField: "Authorization"),
               authorization.hasPrefix("Bearer "),
               let id = authorization.dropFirst(7).split(separator: "|").first.map(String.init),
@@ -195,4 +196,16 @@ private final class MockGoogleURLProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() { }
+}
+
+extension URLRequest {
+    /// Apple's URLSession hands URLProtocols the body as a stream; the mocks read httpBody.
+    func withMaterializedBody() -> URLRequest {
+        guard httpBody == nil, let stream = httpBodyStream else { return self }
+        var copy = self, data = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+        stream.open(); defer { stream.close() }
+        while case let count = stream.read(&buffer, maxLength: buffer.count), count > 0 { data.append(buffer, count: count) }
+        copy.httpBody = data
+        return copy
+    }
 }

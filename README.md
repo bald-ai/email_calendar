@@ -56,7 +56,7 @@ swift test --parallel
 
 Tests use temporary databases and mock URLSession transports; they do not touch your Google account. The Xcode project is checked in. After adding Swift source files, regenerate it with `python3 scripts/generate_project.py`.
 
-Validated in this workspace with Swift 6.0.3: **36 tests passed**, covering SQLite isolation/rollback, OAuth-token retry, MIME/attachments, history and sync-token recovery, sender/filter undo, account-switch cancellation, Bubble Up, drafts/sending, recurrence, invitations and confirmed-write recovery. All 29 app source files passed parsing for the macOS 15 target, and the project references, scheme and resource plists parsed successfully. Native SDK compilation is covered by the added macOS CI workflow but has not run here.
+Validated on macOS with Xcode: the app compiles and **all tests pass**, covering SQLite isolation/rollback, OAuth-token retry, MIME/attachments, history and sync-token recovery, sender/filter undo, account-switch cancellation, Bubble Up, drafts/sending, recurrence, invitations and confirmed-write recovery. All 29 app source files passed parsing for the macOS 15 target, and the project references, scheme and resource plists parsed successfully. Native SDK compilation is covered by the added macOS CI workflow but has not run here.
 
 Before treating this as a finished release, verify on your Mac:
 

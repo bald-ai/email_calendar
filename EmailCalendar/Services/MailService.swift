@@ -165,6 +165,7 @@ actor MailService {
                 try await fullSync(account: account)
             }
         } else { try await fullSync(account: account) }
+        try await seedApprovedInboxSenders(account: account)
         try await reconcileScreener(account: account)
         undoActions = undoActions.filter { $0.value.token.expiresAt > .now }
         return try await cached(accountID: account.id)
@@ -239,6 +240,24 @@ actor MailService {
         } while pageToken != nil
         // Incomplete seeds safely resume; existing user decisions are never overwritten.
         try await store.setMetadata(true, key: "sentRecipientsSeeded", accountID: account.id)
+    }
+
+    /// The Screener applies to senders who appear after setup. Mail already in the Inbox at
+    /// first sync stays where it is instead of being moved out of Gmail's Inbox en masse.
+    private func seedApprovedInboxSenders(account: Account) async throws {
+        if try await store.metadata(Bool.self, key: "inboxSendersSeeded", accountID: account.id) == true { return }
+        var rules = try await store.all(SenderRule.self, collection: "senderRules", accountID: account.id)
+        let threads = try await store.all(MailThread.self, collection: "threads", accountID: account.id)
+        for thread in threads where thread.labels.contains("INBOX") {
+            for message in thread.messages where !message.labels.contains("SENT") && !message.labels.contains("DRAFT") {
+                let sender = message.from.email.lowercased()
+                guard !sender.isEmpty, sender != account.email.lowercased(), rule(for: sender, rules: rules) == nil else { continue }
+                let approved = SenderRule(accountID: account.id, key: sender, decision: .approved)
+                try await store.save(approved, id: approved.key, collection: "senderRules", accountID: account.id)
+                rules.append(approved)
+            }
+        }
+        try await store.setMetadata(true, key: "inboxSendersSeeded", accountID: account.id)
     }
 
     private func ensureLabels(accountID: String) async throws {

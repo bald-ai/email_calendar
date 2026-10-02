@@ -268,8 +268,12 @@ public actor GoogleAPI {
                 hasRefreshedToken = true
                 continue
             }
+            // Rate-limited requests were rejected unprocessed, so any method may retry them.
             // Repeating a send or insert after a server failure could create duplicates.
-            if method == "GET", [429, 500, 502, 503, 504].contains(response.statusCode), transientAttempts < 3 {
+            let rateLimited = response.statusCode == 429
+                || (response.statusCode == 403 && String(decoding: data, as: UTF8.self).contains("ateLimitExceeded"))
+            if rateLimited || (method == "GET" && [500, 502, 503, 504].contains(response.statusCode)),
+               transientAttempts < (rateLimited ? 6 : 3) {
                 let retry = min(30, max(0.5, response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init) ?? pow(2, Double(transientAttempts))))
                 transientAttempts += 1
                 try await Task.sleep(for: .seconds(retry))

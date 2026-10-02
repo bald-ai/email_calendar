@@ -74,6 +74,7 @@ private final class CalendarURLProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        let request = self.request.withMaterializedBody()
         guard let fixture = Self.registry.fixture(for: request), let url = request.url else {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
