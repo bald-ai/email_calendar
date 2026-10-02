@@ -1,0 +1,11 @@
+name: Swift and macOS app
+on:
+  push:
+  pull_request:
+jobs:
+  validate:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Core integration tests and native build
+        run: ./scripts/check.sh

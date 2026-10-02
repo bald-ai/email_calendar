@@ -1,0 +1,12 @@
+#include? "Secrets.xcconfig"
+MACOSX_DEPLOYMENT_TARGET = 15.0
+SWIFT_VERSION = 6.0
+PRODUCT_BUNDLE_IDENTIFIER = ai.bald.EmailCalendar
+PRODUCT_NAME = EmailCalendar
+GENERATE_INFOPLIST_FILE = NO
+INFOPLIST_FILE = EmailCalendar/Resources/Info.plist
+CODE_SIGN_ENTITLEMENTS = EmailCalendar/Resources/EmailCalendar.entitlements
+ENABLE_APP_SANDBOX = YES
+SWIFT_STRICT_CONCURRENCY = complete
+HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT)/CSQLite
+SWIFT_INCLUDE_PATHS = $(inherited) $(SRCROOT)/CSQLite
