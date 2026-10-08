@@ -109,7 +109,7 @@ The goal is a glanceable "where am I in my week?" view, one keystroke away, on t
 
 ### Summoning
 
-- The default global hotkey is **⌥Space**, configurable in Preferences.
+- The default global hotkey is **⌘F2**, configurable in Preferences.
 - **Tap** the hotkey to toggle the overlay open and closed.
 - **Hold** it to peek: the overlay shows while held and hides on release. This allows a 1-second glance without breaking focus.
 - The overlay appears on the **screen containing the mouse cursor**.
@@ -122,7 +122,7 @@ The goal is a glanceable "where am I in my week?" view, one keystroke away, on t
 - The overlay spans the full width of the screen and slides down from the top edge.
   - Use a short spring animation, about 200–250 ms in and faster on the way out.
   - Respect "Reduce Motion": fade instead of slide.
-- Default height is **~25% of the screen**. Drag the bottom edge to resize, and remember the height per display.
+- Default height is **~37.5% of the screen**. Drag the bottom edge to resize, and remember the height per display.
 - It dismisses on: the hotkey, `Esc`, clicking outside, or switching Spaces.
 
 ### Layout
@@ -178,7 +178,7 @@ The goal is a glanceable "where am I in my week?" view, one keystroke away, on t
 ## Definition of done (v1)
 
 - [ ] I can sign in once and stay signed in across restarts.
-- [ ] ⌥Space opens the week overlay in under 150 ms on any Space, including over a full-screen app, on the display under my cursor.
+- [ ] ⌘F2 opens the week overlay in under 150 ms on any Space, including over a full-screen app, on the display under my cursor.
 - [ ] The overlay shows my real events, the now-line and the "Next up" countdown. I can scroll hours, page weeks and quick-add an event.
 - [ ] I can triage the Imbox entirely from the keyboard.
 - [ ] A new sender lands in the Screener. Saying No keeps them out, also on my phone's Gmail.

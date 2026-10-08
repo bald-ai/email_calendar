@@ -1,6 +1,6 @@
 # Email + Calendar
 
-A native macOS 15+ app written in Swift 6, SwiftUI and AppKit. Mail is backed by Gmail, calendars by Google Calendar, and the local cache by SQLite. The week overlay opens from cached data with **⌥Space**: tap to toggle, hold to peek.
+A native macOS 15+ app written in Swift 6, SwiftUI and AppKit. Mail is backed by Gmail, calendars by Google Calendar, and the local cache by SQLite. The week overlay opens from cached data with **⌘F2**: tap to toggle, hold to peek. It scrolls smoothly through days, and switches between a week timeline and a month view.
 
 ## Run on your Mac (demo data, no Google account)
 
@@ -54,8 +54,9 @@ The app polls while open and refreshes on focus and wake. Cached mail and events
 | `/`, `⌘K` | Search, command palette |
 | Escape, `⌘Z` | Back, undo |
 | `⌘Return` | Send from the composer |
-| `⌥Space` | Toggle week overlay; hold to peek |
-| `←` / `→`, `T`, Escape | Overlay previous/next week, now, dismiss |
+| `⌘F2` | Toggle the calendar overlay; hold to peek (on most Macs, press fn too unless F-keys are standard function keys) |
+| `W` / `M` | Overlay week or month view |
+| `←` / `→`, `T`, Escape | Overlay previous/next week (or month), today, dismiss |
 
 ## Validate
 

@@ -66,7 +66,12 @@ final class AppStore {
     init() {
         auth = GoogleAuth()
         let defaults = UserDefaults.standard
-        overlayHeight = defaults.object(forKey: "overlayHeight") as? Double ?? 0.25
+        // The overlay grew from 25% to 37.5% of the screen; old untouched defaults move up once.
+        if !defaults.bool(forKey: "overlay.taller") {
+            defaults.set(true, forKey: "overlay.taller")
+            if (defaults.object(forKey: "overlayHeight") as? Double ?? 0.25) <= 0.25 { defaults.removeObject(forKey: "overlayHeight") }
+        }
+        overlayHeight = defaults.object(forKey: "overlayHeight") as? Double ?? 0.375
         bubbleNotifications = defaults.object(forKey: "bubbleNotifications") as? Bool ?? true
         launchAtLogin = defaults.object(forKey: "launchAtLogin") as? Bool ?? true
         let forced = ProcessInfo.processInfo.environment["EC_MOCK"]

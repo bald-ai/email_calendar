@@ -349,7 +349,7 @@ private struct WelcomeView: View {
                 }
             }
             .buttonStyle(PillButtonStyle(fill: Theme.accent)).disabled(store.isSigningIn)
-            Text("⌥Space opens your week. Hold to peek.").foregroundStyle(Theme.secondary).padding(.top, 8)
+            Text("⌘F2 opens your week. Hold to peek.").foregroundStyle(Theme.secondary).padding(.top, 8)
         }
         .frame(maxWidth: 520).padding(44).frame(maxWidth: .infinity, maxHeight: .infinity)
     }

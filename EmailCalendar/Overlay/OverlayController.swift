@@ -9,7 +9,7 @@ import SwiftUI
 extension KeyboardShortcuts.Name {
     static let toggleCalendarOverlay = Self(
         "toggleCalendarOverlay",
-        default: .init(.space, modifiers: [.option])
+        default: .init(.f2, modifiers: [.command])
     )
 }
 
@@ -44,6 +44,14 @@ final class OverlayController {
     func installHotkey() {
         guard !installedHotkey else { return }
         installedHotkey = true
+        // KeyboardShortcuts stores the default on first use, so earlier installs still hold ⌥Space.
+        // Move them to ⌘F2 once; a shortcut the user recorded themselves is left alone.
+        if !UserDefaults.standard.bool(forKey: "overlay.hotkey.cmdF2") {
+            UserDefaults.standard.set(true, forKey: "overlay.hotkey.cmdF2")
+            if KeyboardShortcuts.getShortcut(for: .toggleCalendarOverlay) == .init(.space, modifiers: [.option]) {
+                KeyboardShortcuts.setShortcut(.init(.f2, modifiers: [.command]), for: .toggleCalendarOverlay)
+            }
+        }
 
         KeyboardShortcuts.onKeyDown(for: .toggleCalendarOverlay) { [weak self] in
             Task { @MainActor in self?.shortcutDown() }
@@ -280,13 +288,13 @@ final class OverlayController {
         let defaults = UserDefaults.standard
         let key = heightDefaultsKey(for: screen)
         let value = defaults.object(forKey: key) == nil ? defaultRatio : defaults.double(forKey: key)
-        return CGFloat(min(0.80, max(0.15, value.isFinite ? value : 0.25)))
+        return CGFloat(min(0.80, max(0.15, value.isFinite ? value : 0.375)))
     }
 
     private func synchronizeHeightPreference() -> Double {
         let defaults = UserDefaults.standard
         let revisionKey = "overlay.height.defaultRatio"
-        let ratio = min(0.80, max(0.15, store.overlayHeight.isFinite ? store.overlayHeight : 0.25))
+        let ratio = min(0.80, max(0.15, store.overlayHeight.isFinite ? store.overlayHeight : 0.375))
         if let previous = defaults.object(forKey: revisionKey) as? Double, previous != ratio {
             // An explicit preference change resets the remembered display sizes.
             for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("overlay.height.display.") {
