@@ -9,7 +9,7 @@ import SwiftUI
 extension KeyboardShortcuts.Name {
     static let toggleCalendarOverlay = Self(
         "toggleCalendarOverlay",
-        default: .init(.f2, modifiers: [.command])
+        default: .init(.f3, modifiers: [.command])
     )
 }
 
@@ -44,12 +44,14 @@ final class OverlayController {
     func installHotkey() {
         guard !installedHotkey else { return }
         installedHotkey = true
-        // KeyboardShortcuts stores the default on first use, so earlier installs still hold ⌥Space.
-        // Move them to ⌘F2 once; a shortcut the user recorded themselves is left alone.
-        if !UserDefaults.standard.bool(forKey: "overlay.hotkey.cmdF2") {
-            UserDefaults.standard.set(true, forKey: "overlay.hotkey.cmdF2")
-            if KeyboardShortcuts.getShortcut(for: .toggleCalendarOverlay) == .init(.space, modifiers: [.option]) {
-                KeyboardShortcuts.setShortcut(.init(.f2, modifiers: [.command]), for: .toggleCalendarOverlay)
+        // KeyboardShortcuts stores the default on first use, so earlier installs still hold an old
+        // default (⌥Space, then ⌘F2, which Prompt Palette also uses). Move them to ⌘F3 once;
+        // a shortcut the user recorded themselves is left alone.
+        if !UserDefaults.standard.bool(forKey: "overlay.hotkey.cmdF3") {
+            UserDefaults.standard.set(true, forKey: "overlay.hotkey.cmdF3")
+            let oldDefaults: [KeyboardShortcuts.Shortcut] = [.init(.space, modifiers: [.option]), .init(.f2, modifiers: [.command])]
+            if let current = KeyboardShortcuts.getShortcut(for: .toggleCalendarOverlay), oldDefaults.contains(current) {
+                KeyboardShortcuts.setShortcut(.init(.f3, modifiers: [.command]), for: .toggleCalendarOverlay)
             }
         }
 

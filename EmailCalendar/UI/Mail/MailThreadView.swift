@@ -46,10 +46,6 @@ struct MailThreadView: View {
                         MailMessageCard(message: message, isLatest: message.id == thread.latestMessage?.id,
                                         initiallyExpanded: message.id == thread.latestMessage?.id || messages.count <= 2, compose: compose)
                     }
-                    if store.poweringThrough {
-                        Text("Powering through new mail · \(max(0, store.newForYou.filter { $0.id != thread.id }.count)) more after this")
-                            .font(.caption).foregroundStyle(Theme.secondary)
-                    }
                     Spacer(minLength: 110)
                 }
                 .frame(maxWidth: 790).frame(maxWidth: .infinity).padding(.horizontal, 24)

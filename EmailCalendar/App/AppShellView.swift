@@ -47,6 +47,7 @@ struct AppShellView: View {
         }
         .onChange(of: store.navigation) { _, _ in
             store.closeThread()
+            store.endPowerThrough()
             if !store.searchQuery.isEmpty { endSearch() }
         }
         .onChange(of: store.searchQuery) { _, query in
@@ -98,7 +99,7 @@ struct AppShellView: View {
     }
 
     private var showsBack: Bool {
-        store.isSignedIn && !store.isComposing && (store.openThreadID != nil || store.navigation != .imbox || !store.searchQuery.isEmpty)
+        store.isSignedIn && !store.isComposing && (store.openThreadID != nil || store.poweringThrough || store.navigation != .imbox || !store.searchQuery.isEmpty)
     }
 
     /// A popover rather than a Menu: macOS menus flatten custom labels, which would lose the avatar.
@@ -134,12 +135,16 @@ struct AppShellView: View {
     }
 
     private var backTitle: String {
-        if store.openThreadID != nil { return store.navigation == .imbox ? "Back" : store.navigation.title }
+        if store.openThreadID != nil {
+            if store.poweringThrough { return "Power Through" }
+            return store.navigation == .imbox ? "Back" : store.navigation.title
+        }
         return "Imbox"
     }
 
     private func goBack() {
         if store.openThreadID != nil { store.closeThread() }
+        else if store.poweringThrough { store.endPowerThrough() }
         else if !store.searchQuery.isEmpty { endSearch() }
         else { store.navigation = .imbox }
     }
@@ -304,6 +309,7 @@ struct JumpMenu: View {
     private func go(_ mailbox: Mailbox) {
         store.navigation = mailbox
         store.closeThread()
+        store.endPowerThrough()
         isPresented = false
     }
 
@@ -349,7 +355,7 @@ private struct WelcomeView: View {
                 }
             }
             .buttonStyle(PillButtonStyle(fill: Theme.accent)).disabled(store.isSigningIn)
-            Text("⌘F2 opens your week. Hold to peek.").foregroundStyle(Theme.secondary).padding(.top, 8)
+            Text("⌘F3 opens your week. Hold to peek.").foregroundStyle(Theme.secondary).padding(.top, 8)
         }
         .frame(maxWidth: 520).padding(44).frame(maxWidth: .infinity, maxHeight: .infinity)
     }

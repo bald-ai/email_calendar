@@ -109,7 +109,7 @@ The goal is a glanceable "where am I in my week?" view, one keystroke away, on t
 
 ### Summoning
 
-- The default global hotkey is **⌘F2**, configurable in Preferences.
+- The default global hotkey is **⌘F3**, configurable in Preferences.
 - **Tap** the hotkey to toggle the overlay open and closed.
 - **Hold** it to peek: the overlay shows while held and hides on release. This allows a 1-second glance without breaking focus.
 - The overlay appears on the **screen containing the mouse cursor**.
@@ -178,7 +178,7 @@ The goal is a glanceable "where am I in my week?" view, one keystroke away, on t
 ## Definition of done (v1)
 
 - [ ] I can sign in once and stay signed in across restarts.
-- [ ] ⌘F2 opens the week overlay in under 150 ms on any Space, including over a full-screen app, on the display under my cursor.
+- [ ] ⌘F3 opens the week overlay in under 150 ms on any Space, including over a full-screen app, on the display under my cursor.
 - [ ] The overlay shows my real events, the now-line and the "Next up" countdown. I can scroll hours, page weeks and quick-add an event.
 - [ ] I can triage the Imbox entirely from the keyboard.
 - [ ] A new sender lands in the Screener. Saying No keeps them out, also on my phone's Gmail.

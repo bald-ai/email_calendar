@@ -16,7 +16,7 @@ final class AppStore {
     var selectedThreadID: String?
     /// The thread shown as a full page; nil shows the mailbox list.
     var openThreadID: String?
-    /// "Power Through New": each action on an open thread advances to the next new one.
+    /// "Power Through New": new Imbox mail as one scrolling stack of cards, instead of the list.
     var poweringThrough = false
     /// Set to ask the mail view to open a blank composer (from menus outside it).
     var composeRequest: UUID?
@@ -177,7 +177,7 @@ final class AppStore {
         defer { isSigningIn = false }
         // Stop new UI and polling work before draining operations tied to these credentials.
         account = nil; threads = []; cachedThreads = []; senderRules = []; remoteImageSenders = []
-        calendars = []; events = []; selectedThreadID = nil; selectedEventID = nil; openThreadID = nil
+        calendars = []; events = []; selectedThreadID = nil; selectedEventID = nil; openThreadID = nil; poweringThrough = false
         searchQuery = ""; undoMessage = nil; undoID = nil; undoTask?.cancel()
         await mail?.cancelAllOperations()
         await calendarService?.cancelAllOperations()
@@ -272,9 +272,9 @@ final class AppStore {
         if thread.unread { Task { await setRead(thread, true) } }
     }
 
+    /// Back to the page under the thread: the mailbox list, or the Power Through stack.
     func closeThread() {
         openThreadID = nil
-        poweringThrough = false
     }
 
     /// New Imbox mail, oldest first, so Power Through works through it in arrival order.
@@ -283,16 +283,31 @@ final class AppStore {
     }
 
     func powerThroughNew() {
-        guard let first = newForYou.first else { return }
+        guard !newForYou.isEmpty else { return }
+        openThreadID = nil
         poweringThrough = true
-        open(first)
     }
 
-    /// After acting on the open thread: the next new thread while powering through, else back to the list.
+    func endPowerThrough() {
+        poweringThrough = false
+    }
+
+    /// After acting on the open thread, go back to the page under it; the thread has left the list or stack.
     func advanceAfterAction(from threadID: String) {
         guard openThreadID == threadID else { return }
-        if poweringThrough, let next = newForYou.first(where: { $0.id != threadID }) { open(next) }
-        else { closeThread() }
+        closeThread()
+    }
+
+    /// Power Through's "Mark all as seen": the given threads move to Previously Seen, then back to the Imbox.
+    func markAllSeen(_ threads: [MailThread]) async {
+        guard let mail, let account else { return }
+        do {
+            for thread in threads where thread.unread && thread.accountID == account.id {
+                _ = try await mail.markUnread(threadID: thread.id, unread: false, account: account)
+            }
+            if self.account?.id == account.id { try await loadMailCache(accountID: account.id) }
+        } catch { reportError(error) }
+        endPowerThrough()
     }
 
     func decision(for sender: String) -> ScreeningDecision? {
