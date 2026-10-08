@@ -13,18 +13,15 @@ struct MailScreenerView: View {
 
     var body: some View {
         if senders.isEmpty {
-            ContentUnavailableView("All screened", systemImage: "person.crop.circle.badge.checkmark",
-                description: Text("New senders will appear here. You decide who reaches your Imbox."))
+            VStack(spacing: 10) {
+                Image(systemName: "checkmark.circle").font(.system(size: 30, weight: .light)).foregroundStyle(Theme.secondary)
+                Text("Nobody waiting. New senders show up here first.").font(.callout).foregroundStyle(Theme.secondary)
+            }.padding(.top, 40)
         } else {
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    Text("Who gets your attention?").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Approve a sender to move their mail to the Imbox. Screen them out to keep future messages out of Gmail's inbox, too.")
-                        .font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                    ForEach(senders) { thread in
-                        ScreenerSenderRow(thread: thread) { select(thread) }
-                    }
-                }.padding(16)
+            LazyVStack(spacing: 4) {
+                ForEach(senders) { thread in
+                    ScreenerSenderRow(thread: thread) { select(thread) }
+                }
             }
         }
     }
@@ -36,29 +33,39 @@ private struct ScreenerSenderRow: View {
     var select: () -> Void
     @State private var entireDomain = false
     @State private var isDeciding = false
+    @State private var hovering = false
 
     private var domain: String { thread.sender.email.split(separator: "@").last.map(String.init) ?? "" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        HStack(spacing: 12) {
             Button(action: select) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(thread.sender.displayName).font(.headline)
-                    Text(thread.sender.email).font(.caption).foregroundStyle(.secondary)
-                    Text(thread.subject).font(.callout).lineLimit(1).padding(.top, 3)
-                    Text(thread.snippet).font(.callout).foregroundStyle(.secondary).lineLimit(2)
-                }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(.plain)
-            Toggle("Entire @\(domain) domain", isOn: $entireDomain).toggleStyle(.checkbox).font(.caption)
-            HStack(spacing: 10) {
-                Button { decide(.approved) } label: { Label("Yes", systemImage: "checkmark").frame(maxWidth: .infinity) }
-                    .buttonStyle(.borderedProminent)
-                Button { decide(.blocked) } label: { Label("No", systemImage: "xmark").frame(maxWidth: .infinity) }
-                    .buttonStyle(.bordered)
-                if isDeciding { ProgressView().controlSize(.small) }
-            }.controlSize(.large).disabled(isDeciding)
-        }.padding(14).background(.background, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
+                HStack(spacing: 12) {
+                    Avatar(name: thread.sender.displayName, key: thread.sender.email, size: 38)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(thread.sender.displayName).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                            Text(entireDomain ? "everyone @\(domain)" : thread.sender.email)
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.secondary).lineLimit(1)
+                        }
+                        Text("\(thread.subject) – \(thread.snippet)").font(.system(size: 12.5)).foregroundStyle(Theme.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain).help("Preview this email")
+            if isDeciding { ProgressView().controlSize(.small) }
+            Button { decide(.approved) } label: { Label("Yes", systemImage: "hand.thumbsup.fill") }
+                .buttonStyle(PillButtonStyle(fill: Theme.yes)).help("Let them into your Imbox")
+            Button { decide(.blocked) } label: { Label("No", systemImage: "hand.thumbsdown.fill") }
+                .buttonStyle(PillButtonStyle(fill: Theme.no)).help("Screen them out, also in Gmail")
+        }
+        .disabled(isDeciding)
+        .padding(.horizontal, 10).padding(.vertical, 10)
+        .background(hovering ? Theme.hover : .clear, in: RoundedRectangle(cornerRadius: 12))
+        .onHover { hovering = $0 }
+        .contextMenu {
+            Toggle("Decide for everyone @\(domain)", isOn: $entireDomain)
+        }
     }
 
     private func decide(_ decision: ScreeningDecision) {

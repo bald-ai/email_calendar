@@ -8,42 +8,124 @@ struct MailThreadView: View {
     var thread: MailThread
     var compose: (MailMessage, MailComposeAction) -> Void
     var bubble: () -> Void
+    var act: (MailRootView.ThreadAction) -> Void
+    @Binding var showsMore: Bool
 
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 14) {
-                Text(thread.subject).font(.title3.weight(.semibold)).lineLimit(2)
-                Spacer()
-                action("Archive", symbol: "archivebox", key: "e") { Task { await store.archive(thread) } }
-                action(thread.isSetAside ? "Return to Imbox" : "Set Aside", symbol: thread.isSetAside ? "bookmark.fill" : "bookmark", key: "s") {
-                    Task { await store.toggleSetAside(thread) }
-                }
-                action("Bubble Up", symbol: "clock.arrow.circlepath", key: "b", perform: bubble)
-                Menu {
-                    Button(thread.unread ? "Mark read" : "Mark unread") { Task { await store.setRead(thread, thread.unread) } }
-                    Button("Move to Trash", role: .destructive) { Task { await store.trash(thread) } }
-                } label: { Image(systemName: "ellipsis.circle") }
-                    .menuStyle(.borderlessButton).fixedSize().help("More actions")
-            }.padding(18)
-            Divider()
-            ScrollView {
-                LazyVStack(spacing: 16) {
-                    if let due = thread.bubbleUpAt {
-                        Label("Returns \(due.formatted(date: .abbreviated, time: .shortened))", systemImage: "clock")
-                            .font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    ForEach(thread.messages.sorted { $0.date < $1.date }) { message in
-                        MailMessageCard(message: message, initiallyExpanded: message.id == thread.latestMessage?.id, compose: compose)
-                    }
-                }.padding(20)
-            }
-        }
-        .background(.background)
+    private var messages: [MailMessage] { thread.messages.sorted { $0.date < $1.date } }
+    private var replyTarget: MailMessage? {
+        thread.messages.filter { !$0.labels.contains("DRAFT") && $0.draftID == nil }.max { $0.date < $1.date }
+    }
+    private var draft: MailMessage? {
+        thread.messages.filter { $0.labels.contains("DRAFT") || $0.draftID != nil }.max { $0.date < $1.date }
+    }
+    private var participants: [MailAddress] {
+        var seen = Set<String>()
+        return messages.map(\.from).filter { seen.insert($0.email.lowercased()).inserted }
     }
 
-    private func action(_ title: String, symbol: String, key: String, perform: @escaping () -> Void) -> some View {
-        Button(action: perform) { Image(systemName: symbol).font(.system(size: 15)) }
-            .buttonStyle(.borderless).help("\(title) (\(key))").accessibilityLabel(title)
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            ScrollView {
+                VStack(spacing: 18) {
+                    HStack(spacing: -8) {
+                        ForEach(participants.prefix(4), id: \.email) { person in
+                            Avatar(name: person.displayName, key: person.email, size: 32)
+                                .overlay(Circle().stroke(Theme.window, lineWidth: 2))
+                        }
+                    }.padding(.top, 14)
+                    Text(thread.subject.isEmpty ? "(no subject)" : thread.subject)
+                        .font(.system(size: 30, weight: .bold)).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 20)
+                    if let due = thread.bubbleUpAt {
+                        Label("Bubbles up \(due.formatted(date: .abbreviated, time: .shortened))", systemImage: "bubbles.and.sparkles")
+                            .font(.callout).foregroundStyle(Theme.unread)
+                    } else if thread.isSetAside {
+                        Label("Set aside", systemImage: "pin.fill").font(.callout).foregroundStyle(Theme.secondary)
+                    }
+                    ForEach(messages) { message in
+                        MailMessageCard(message: message, isLatest: message.id == thread.latestMessage?.id,
+                                        initiallyExpanded: message.id == thread.latestMessage?.id || messages.count <= 2, compose: compose)
+                    }
+                    if store.poweringThrough {
+                        Text("Powering through new mail · \(max(0, store.newForYou.filter { $0.id != thread.id }.count)) more after this")
+                            .font(.caption).foregroundStyle(Theme.secondary)
+                    }
+                    Spacer(minLength: 110)
+                }
+                .frame(maxWidth: 790).frame(maxWidth: .infinity).padding(.horizontal, 24)
+            }
+            .scrollIndicators(.never)
+            actionBar.padding(.bottom, 22)
+        }
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 4) {
+            if let draft {
+                barButton("Edit Draft", symbol: "square.and.pencil", key: "↩") { compose(draft, .editDraft) }
+            } else if let replyTarget {
+                barButton("Reply Now", symbol: "arrowshape.turn.up.left", key: "R") { compose(replyTarget, .reply) }
+            }
+            barButton(thread.isSetAside ? "Take Back" : "Set Aside", symbol: "pin", key: "A") { act(.setAside) }
+            barButton("Bubble Up", symbol: "bubbles.and.sparkles", key: "Z", perform: bubble)
+            barButton("Archive", symbol: "archivebox", key: "E") { act(.archive) }
+            barButton("More", symbol: "ellipsis", key: "M") { showsMore.toggle() }
+                .popover(isPresented: $showsMore, arrowEdge: .top) { moreMenu }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 6)
+        .background(Theme.actionBar, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.06)))
+        .shadow(color: .black.opacity(0.35), radius: 16, y: 6)
+    }
+
+    private var moreMenu: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let replyTarget {
+                moreItem("Reply all", symbol: "arrowshape.turn.up.left.2") { compose(replyTarget, .replyAll) }
+                moreItem("Forward", symbol: "arrowshape.turn.up.right") { compose(replyTarget, .forward) }
+                Divider().padding(.vertical, 4)
+            }
+            moreItem(thread.unread ? "Mark as read" : "Mark as unread", symbol: "envelope.badge") { act(.toggleRead) }
+            moreItem("Move to Trash", symbol: "trash") { act(.trash) }
+        }
+        .padding(8).frame(width: 220)
+    }
+
+    private func moreItem(_ title: String, symbol: String, perform: @escaping () -> Void) -> some View {
+        Button { showsMore = false; perform() } label: {
+            Label(title, systemImage: symbol).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
+        }.buttonStyle(QuietButtonStyle())
+    }
+
+    private func barButton(_ title: String, symbol: String, key: String, perform: @escaping () -> Void) -> some View {
+        ActionBarButton(title: title, symbol: symbol, key: key, perform: perform)
+    }
+}
+
+private struct ActionBarButton: View {
+    var title: String
+    var symbol: String
+    var key: String
+    var perform: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: perform) {
+            VStack(spacing: 4) {
+                Image(systemName: symbol).font(.system(size: 15, weight: .semibold)).frame(height: 18)
+                Text(title).font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(.white)
+            .frame(width: 84, height: 46)
+            .overlay(alignment: .topTrailing) {
+                Text(key).font(.system(size: 9, weight: .bold)).foregroundStyle(.white.opacity(0.55)).padding(.top, 3).padding(.trailing, 7)
+            }
+            .background(.white.opacity(hovering ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.back.opacity(hovering ? 0.7 : 0), lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).onHover { hovering = $0 }.help("\(title) (\(key))")
     }
 }
 
@@ -52,6 +134,7 @@ enum MailComposeAction: Equatable { case reply, replyAll, forward, editDraft }
 private struct MailMessageCard: View {
     @Environment(AppStore.self) private var store
     var message: MailMessage
+    var isLatest = false
     var compose: (MailMessage, MailComposeAction) -> Void
     @State private var expanded: Bool
     @State private var htmlHeight: CGFloat = 180
@@ -59,27 +142,29 @@ private struct MailMessageCard: View {
     @State private var inlineImages: [String: Data] = [:]
     @State private var inlineImageError = false
 
-    init(message: MailMessage, initiallyExpanded: Bool, compose: @escaping (MailMessage, MailComposeAction) -> Void) {
-        self.message = message; self.compose = compose
+    init(message: MailMessage, isLatest: Bool = false, initiallyExpanded: Bool, compose: @escaping (MailMessage, MailComposeAction) -> Void) {
+        self.message = message; self.isLatest = isLatest; self.compose = compose
         _expanded = State(initialValue: initiallyExpanded)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Button { expanded.toggle() } label: {
-                HStack(alignment: .top) {
-                    Image(systemName: "person.crop.circle").font(.title2).foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: 12) {
+                    Avatar(name: message.from.displayName, key: message.from.email, size: 38)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(message.from.displayName).font(.headline)
+                        HStack(spacing: 5) {
+                            Text(message.from.displayName).font(.system(size: 15, weight: .semibold))
+                            if expanded { Text("<\(message.from.email)>").font(.system(size: 13)).foregroundStyle(Theme.secondary) }
+                        }
                         if expanded {
-                            Text(message.from.email).font(.caption).foregroundStyle(.secondary)
-                            Text("To: \(message.to.map(\.formatted).joined(separator: ", "))").font(.caption).foregroundStyle(.secondary)
-                            if !message.cc.isEmpty { Text("Cc: \(message.cc.map(\.formatted).joined(separator: ", "))").font(.caption).foregroundStyle(.secondary) }
-                        } else { Text(message.snippet).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
+                            Text("to \(message.to.map(\.formatted).joined(separator: ", "))").font(.system(size: 13)).foregroundStyle(Theme.secondary)
+                            if !message.cc.isEmpty { Text("cc \(message.cc.map(\.formatted).joined(separator: ", "))").font(.system(size: 13)).foregroundStyle(Theme.secondary) }
+                        } else { Text(message.snippet).font(.system(size: 13)).foregroundStyle(Theme.secondary).lineLimit(1) }
                     }
                     Spacer()
-                    Text(message.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.caption).foregroundStyle(.tertiary)
+                    Text(Theme.shortDate(message.date)).font(.system(size: 13)).foregroundStyle(Theme.secondary)
+                        .help(message.date.formatted(date: .complete, time: .shortened))
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
 
@@ -92,13 +177,15 @@ private struct MailMessageCard: View {
                         Button(store.allowsRemoteImages(sender: message.from.email) ? "Hide images" : "Load images") {
                             Task { await store.setAllowsRemoteImages(sender: message.from.email, allowed: !store.allowsRemoteImages(sender: message.from.email)) }
                         }.buttonStyle(.borderless)
-                    }.font(.caption).foregroundStyle(.secondary).padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                    }.font(.caption).foregroundStyle(Theme.secondary).padding(8).background(Theme.raised, in: RoundedRectangle(cornerRadius: 8))
                     MailHTMLView(html: html, allowsRemoteImages: store.allowsRemoteImages(sender: message.from.email), height: $htmlHeight)
                         .frame(height: htmlHeight)
+                        .padding(14).background(Color.white, in: RoundedRectangle(cornerRadius: 14))
                     if inlineImageError { Text("Some inline images could not be loaded.").font(.caption).foregroundStyle(.secondary) }
                 } else {
                     Text(message.plainText.isEmpty ? message.snippet : message.plainText)
-                        .font(.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        .font(.system(size: 15)).lineSpacing(3).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 50)
                 }
                 if !message.attachments.isEmpty {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), alignment: .leading)], alignment: .leading) {
@@ -116,26 +203,28 @@ private struct MailMessageCard: View {
                                 Spacer(minLength: 2)
                                 Button { Task { await saveAttachment(attachment, open: false) } } label: { Image(systemName: "arrow.down.to.line") }
                                     .buttonStyle(.borderless).help("Save attachment")
-                            }.padding(10).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                            }.padding(10).background(Theme.raised, in: RoundedRectangle(cornerRadius: 10))
                                 .disabled(downloading.contains(attachment.id))
                         }
                     }
                 }
-                HStack {
-                    if message.draftID != nil || message.labels.contains("DRAFT") {
-                        Button("Edit draft") { compose(message, .editDraft) }
-                    } else {
-                        Button { compose(message, .reply) } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
-                        Button("Reply all") { compose(message, .replyAll) }
-                        Button("Forward") { compose(message, .forward) }
-                    }
-                    Spacer()
-                }.padding(.top, 4)
+                if !isLatest {
+                    HStack(spacing: 16) {
+                        if message.draftID != nil || message.labels.contains("DRAFT") {
+                            Button("Edit draft") { compose(message, .editDraft) }
+                        } else {
+                            Button("Reply to this") { compose(message, .reply) }
+                            Button("Forward") { compose(message, .forward) }
+                        }
+                        Spacer()
+                    }.buttonStyle(QuietButtonStyle()).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.secondary)
+                        .padding(.leading, 50)
+                }
             }
         }
-        .padding(16)
-        .background(.background, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
+        .padding(22)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(isLatest ? Color(hex: 0xC9895B).opacity(0.7) : Theme.line, lineWidth: 1))
         .task(id: expanded) {
             guard expanded else { return }
             for attachment in message.attachments {

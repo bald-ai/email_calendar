@@ -29,7 +29,8 @@ For normal use, build a signed app, move it to `/Applications`, and launch it th
 
 ## Included
 
-- Imbox, Set Aside, Bubble Up, Screener, Sent, Drafts, All Mail and Calendar.
+- A single centered column with no sidebar: Imbox (new for you / previously seen), Screener, Set Aside (also as a pile at the bottom of the Imbox), Bubble Up, Drafts, Sent, Screened Out, Everything and Calendar, reached from the menu under the logo.
+- Threads open as full pages with a floating action bar: Reply Now, Set Aside, Bubble Up, Archive, More.
 - Gmail history sync with expired-cursor recovery, full Gmail search, thread reading, compose/reply/reply-all/forward, attachments, Gmail drafts, read state, archive and Trash.
 - Sender and domain decisions, all-mail moves, Google rejection filters, and five-second undo that restores each message’s previous labels. Remote-image permission is separate from sender approval.
 - Durable Bubble Up times processed on launch and refresh; Gmail labels expose mail states on other devices. Due mail returns at the top when it surfaces, then sorts alongside newer mail.
@@ -43,10 +44,15 @@ The app polls while open and refreshes on focus and wake. Cached mail and events
 
 | Key | Action |
 | --- | --- |
-| `j` / `k`, Return | Navigate/open threads; Return edits a selected draft |
-| `e`, `r`, `a`, `f`, `c` | Archive, reply, reply all, forward, compose |
-| `/`, `⌘K` | Gmail search, command palette |
-| `s`, `b`, `⌘Z` | Toggle Set Aside, Bubble Up, undo |
+| `h` | Open the go-to menu; then `1`–`6` for Imbox, Calendar, Screener, Set Aside, Bubble Up, Drafts |
+| `j` / `k`, Return | Move through emails, open one (in a thread, `j`/`k` go to the next or previous) |
+| `p` | Power Through New: open new mail one after another |
+| `r`, `f`, `c` | Reply, forward, write a new email (reply all is under More) |
+| `a` (or `s`) | Set Aside, or take it back |
+| `z` (or `b`) | Bubble Up |
+| `e`, `m` | Archive, More |
+| `/`, `⌘K` | Search, command palette |
+| Escape, `⌘Z` | Back, undo |
 | `⌘Return` | Send from the composer |
 | `⌥Space` | Toggle week overlay; hold to peek |
 | `←` / `→`, `T`, Escape | Overlay previous/next week, now, dismiss |

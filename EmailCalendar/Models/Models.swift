@@ -10,7 +10,7 @@ public struct Account: Codable, Sendable, Identifiable, Equatable {
 }
 
 public enum Mailbox: String, CaseIterable, Identifiable, Sendable {
-    case imbox, setAside, bubbleUp, screener, sent, drafts, allMail, calendar
+    case imbox, setAside, bubbleUp, screener, screenedOut, sent, drafts, allMail, calendar
     public var id: String { rawValue }
     public var title: String {
         switch self {
@@ -18,9 +18,10 @@ public enum Mailbox: String, CaseIterable, Identifiable, Sendable {
         case .setAside: "Set Aside"
         case .bubbleUp: "Bubble Up"
         case .screener: "Screener"
+        case .screenedOut: "Screened Out"
         case .sent: "Sent"
         case .drafts: "Drafts"
-        case .allMail: "All Mail"
+        case .allMail: "Everything"
         case .calendar: "Calendar"
         }
     }
@@ -30,6 +31,7 @@ public enum Mailbox: String, CaseIterable, Identifiable, Sendable {
         case .setAside: "bookmark"
         case .bubbleUp: "clock.arrow.circlepath"
         case .screener: "person.crop.circle.badge.questionmark"
+        case .screenedOut: "hand.raised"
         case .sent: "paperplane"
         case .drafts: "square.and.pencil"
         case .allMail: "archivebox"

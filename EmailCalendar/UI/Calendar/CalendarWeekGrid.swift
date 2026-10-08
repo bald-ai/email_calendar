@@ -11,7 +11,7 @@ struct CalendarWeekGrid: View {
     var onEmptySlot: (Date) -> Void
 
     private var hourHeight: CGFloat { compact ? 42 : 62 }
-    private let gutter: CGFloat = 43
+    private let gutter: CGFloat = 50
 
     private func color(for event: CalendarEvent) -> Color {
         CalendarGeometry.color(calendars.first { $0.id == event.calendarID }?.colorHex ?? "#6586B5")
@@ -81,7 +81,8 @@ struct CalendarWeekGrid: View {
 
     private func hourLabel(_ hour: Int) -> String {
         let date = Calendar.current.date(bySettingHour: hour, minute: 0, second: 0, of: .now)!
-        return date.formatted(date: .omitted, time: .shortened)
+        // "3 PM" or "15", never wrapping in the narrow gutter.
+        return date.formatted(.dateTime.hour())
     }
 
     private func centerNow(_ proxy: ScrollViewProxy) {

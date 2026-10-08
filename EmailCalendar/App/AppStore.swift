@@ -14,6 +14,12 @@ final class AppStore {
     var events: [CalendarEvent] = []
     var navigation: Mailbox = .imbox
     var selectedThreadID: String?
+    /// The thread shown as a full page; nil shows the mailbox list.
+    var openThreadID: String?
+    /// "Power Through New": each action on an open thread advances to the next new one.
+    var poweringThrough = false
+    /// Set to ask the mail view to open a blank composer (from menus outside it).
+    var composeRequest: UUID?
     var selectedEventID: String?
     var searchQuery = ""
     var isRefreshing = false
@@ -68,7 +74,9 @@ final class AppStore {
             let local: LocalStore
             let api: GoogleAPI
             if isDemoMode {
-                let mockFile = MockGoogleBackend.defaultFileURL()
+                // EC_DEMO_DIR keeps throwaway renders and experiments away from the real demo data.
+                let mockFile = ProcessInfo.processInfo.environment["EC_DEMO_DIR"]
+                    .map { URL(fileURLWithPath: $0).appendingPathComponent("google.json") } ?? MockGoogleBackend.defaultFileURL()
                 let cacheFile = mockFile?.deletingLastPathComponent().appendingPathComponent("cache.sqlite")
                 if defaults.bool(forKey: "resetDemoDataOnLaunch"), let mockFile, let cacheFile {
                     defaults.removeObject(forKey: "resetDemoDataOnLaunch")
@@ -163,7 +171,7 @@ final class AppStore {
         defer { isSigningIn = false }
         // Stop new UI and polling work before draining operations tied to these credentials.
         account = nil; threads = []; cachedThreads = []; senderRules = []; remoteImageSenders = []
-        calendars = []; events = []; selectedThreadID = nil; selectedEventID = nil
+        calendars = []; events = []; selectedThreadID = nil; selectedEventID = nil; openThreadID = nil
         searchQuery = ""; undoMessage = nil; undoID = nil; undoTask?.cancel()
         await mail?.cancelAllOperations()
         await calendarService?.cancelAllOperations()
@@ -237,6 +245,7 @@ final class AppStore {
             case .setAside: return labels.contains("HEY/Set Aside")
             case .bubbleUp: return labels.contains("HEY/Bubble Up")
             case .screener: return labels.contains("HEY/Screener")
+            case .screenedOut: return labels.contains("HEY/Screened Out")
             case .sent: return labels.contains("SENT")
             case .drafts: return labels.contains("DRAFT")
             case .allMail: return true
@@ -249,6 +258,35 @@ final class AppStore {
             }
             return $0.updatedAt > $1.updatedAt
         }
+    }
+
+    func open(_ thread: MailThread) {
+        selectedThreadID = thread.id
+        openThreadID = thread.id
+        if thread.unread { Task { await setRead(thread, true) } }
+    }
+
+    func closeThread() {
+        openThreadID = nil
+        poweringThrough = false
+    }
+
+    /// New Imbox mail, oldest first, so Power Through works through it in arrival order.
+    var newForYou: [MailThread] {
+        visibleThreads(mailbox: .imbox).filter(\.unread).sorted { $0.updatedAt < $1.updatedAt }
+    }
+
+    func powerThroughNew() {
+        guard let first = newForYou.first else { return }
+        poweringThrough = true
+        open(first)
+    }
+
+    /// After acting on the open thread: the next new thread while powering through, else back to the list.
+    func advanceAfterAction(from threadID: String) {
+        guard openThreadID == threadID else { return }
+        if poweringThrough, let next = newForYou.first(where: { $0.id != threadID }) { open(next) }
+        else { closeThread() }
     }
 
     func decision(for sender: String) -> ScreeningDecision? {

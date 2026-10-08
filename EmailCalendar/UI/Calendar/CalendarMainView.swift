@@ -22,15 +22,15 @@ struct CalendarMainView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Text(anchor.formatted(.dateTime.month(.wide).year())).font(.title2.weight(.medium))
+                Text(anchor.formatted(.dateTime.month(.wide).year())).font(.system(size: 26, weight: .bold))
                 Spacer()
                 Button { move(-1) } label: { Image(systemName: "chevron.left") }.help("Previous \(mode.rawValue.lowercased())")
                 Button("Today") { anchor = .now; scrollToNow = UUID() }
                 Button { move(1) } label: { Image(systemName: "chevron.right") }.help("Next \(mode.rawValue.lowercased())")
                 Picker("View", selection: $mode) {
                     ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }.pickerStyle(.segmented).frame(width: 190)
-            }.padding(16)
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 190)
+            }.padding(.horizontal, 24).padding(.vertical, 18)
             Divider()
             if store.calendars.isEmpty {
                 ContentUnavailableView("Your calendars", systemImage: "calendar", description: Text("Sign in with Google to bring your calendars here."))
