@@ -28,7 +28,10 @@ struct MailRootView: View {
 
     var body: some View {
         Group {
-            if let openThread {
+            if let composition {
+                MailComposerView(composition: composition) { self.composition = nil }
+                    .id(composition.id)
+            } else if let openThread {
                 MailThreadView(thread: openThread, compose: compose, bubble: { bubbleThread = openThread },
                                act: { action in perform(action, on: openThread) }, showsMore: $showsMore)
                     .id(openThread.id)
@@ -57,7 +60,6 @@ struct MailRootView: View {
         }
         .background(MailKeyboardMonitor(enabled: composition == nil && bubbleThread == nil && !showsScreenedSenders && !showsPalette && !loadingComposition,
                                         handle: handleKey).frame(width: 0, height: 0))
-        .sheet(item: $composition) { MailComposerView(composition: $0).environment(store) }
         .sheet(item: $bubbleThread) { thread in
             BubbleUpPicker { date in
                 Task {
@@ -72,6 +74,7 @@ struct MailRootView: View {
         }) {
             MailCommandPalette(commands: commands) { pendingCommand = $0 }.environment(store)
         }
+        .onChange(of: composition?.id) { _, id in store.isComposing = id != nil }
         .onChange(of: store.composeRequest) { _, request in
             if request != nil { composition = .newMessage; store.composeRequest = nil }
         }

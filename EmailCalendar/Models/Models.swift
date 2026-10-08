@@ -28,8 +28,8 @@ public enum Mailbox: String, CaseIterable, Identifiable, Sendable {
     public var symbol: String {
         switch self {
         case .imbox: "tray"
-        case .setAside: "bookmark"
-        case .bubbleUp: "clock.arrow.circlepath"
+        case .setAside: "pin"
+        case .bubbleUp: "bubbles.and.sparkles"
         case .screener: "person.crop.circle.badge.questionmark"
         case .screenedOut: "hand.raised"
         case .sent: "paperplane"

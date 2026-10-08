@@ -57,7 +57,7 @@ struct OverlayWeekView: View {
                 .gesture(DragGesture(minimumDistance: 1).onChanged { onResizeChanged($0.translation.height) }.onEnded { _ in onResizeEnded() })
                 .onHover { hovering in if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() } }
         }
-        .background(.ultraThinMaterial)
+        .background(Theme.window.opacity(0.82)).background(.ultraThinMaterial)
         .environment(store)
         .focusable().focusEffectDisabled()
         .focused($overlayFocused)
@@ -87,12 +87,27 @@ struct OverlayWeekView: View {
         HStack(spacing: 12) {
             TimelineView(.periodic(from: .now, by: 15)) { context in
                 let next = nextEvent(at: context.date)
-                HStack(spacing: 7) {
+                HStack(spacing: 8) {
                     if let next {
-                        Circle().fill(CalendarGeometry.color(store.calendars.first { $0.id == next.calendarID }?.colorHex ?? "#6586B5")).frame(width: 6, height: 6)
-                        Text(countdown(for: next, at: context.date)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        let color = CalendarGeometry.color(store.calendars.first { $0.id == next.calendarID }?.colorHex ?? "#6586B5")
+                        let isNow = next.start <= context.date
+                        // The anchor: one glance answers "what's next?" without reading the grid.
+                        HStack(spacing: 7) {
+                            Circle().fill(color).frame(width: 8, height: 8)
+                            Text(countdown(for: next, at: context.date)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                        }
+                        .padding(.horizontal, 11).padding(.vertical, 5)
+                        .background(color.opacity(isNow ? 0.45 : 0.25), in: Capsule())
+                        .onTapGesture { selectedEvent = next }
+                        if let url = next.videoURL, next.start.timeIntervalSince(context.date) < 15 * 60 {
+                            Button {
+                                NSWorkspace.shared.open(url)
+                                onClose()
+                            } label: { Label("Join", systemImage: "video.fill").font(.system(size: 12, weight: .semibold)) }
+                                .buttonStyle(PillButtonStyle(fill: Theme.yes)).help("Join the call")
+                        }
                     } else {
-                        Text(store.account == nil ? "Sign in to see your week" : "No upcoming events").font(.system(size: 12)).foregroundStyle(.secondary)
+                        Text(store.account == nil ? "Sign in to see your week" : "Nothing coming up.").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
             }

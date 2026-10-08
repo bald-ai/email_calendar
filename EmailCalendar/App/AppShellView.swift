@@ -98,7 +98,7 @@ struct AppShellView: View {
     }
 
     private var showsBack: Bool {
-        store.isSignedIn && (store.openThreadID != nil || store.navigation != .imbox || !store.searchQuery.isEmpty)
+        store.isSignedIn && !store.isComposing && (store.openThreadID != nil || store.navigation != .imbox || !store.searchQuery.isEmpty)
     }
 
     /// A popover rather than a Menu: macOS menus flatten custom labels, which would lose the avatar.
@@ -187,7 +187,7 @@ struct AppShellView: View {
 }
 
 /// The logo menu: numbered destinations, then everything else. Type to filter or search.
-private struct JumpMenu: View {
+struct JumpMenu: View {
     @Environment(AppStore.self) private var store
     @Binding var isPresented: Bool
     @State private var filter = ""

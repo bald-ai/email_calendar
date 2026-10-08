@@ -111,7 +111,8 @@ struct PillButtonStyle: ButtonStyle {
 
 struct QuietButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label.foregroundStyle(Theme.text).opacity(configuration.isPressed ? 0.6 : 1).contentShape(Rectangle())
+        // No color of its own, so `.foregroundStyle` on the button (or the surrounding view) applies.
+        configuration.label.opacity(configuration.isPressed ? 0.6 : 1).contentShape(Rectangle())
     }
 }
 #endif

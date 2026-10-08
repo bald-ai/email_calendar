@@ -36,20 +36,41 @@ struct CalendarEventEditor: View {
         _customRecurrence = State(initialValue: event.recurrence.joined(separator: "\n"))
     }
 
+    private var calendarColor: Color {
+        CalendarGeometry.color(store.calendars.first { $0.id == event.calendarID }?.colorHex ?? "#6586B5")
+    }
+
+    private var whenText: String {
+        if event.isAllDay {
+            let last = event.end.addingTimeInterval(-1)
+            return Calendar.current.isDate(event.start, inSameDayAs: last)
+                ? event.start.formatted(.dateTime.weekday(.wide).month(.wide).day())
+                : "\(event.start.formatted(.dateTime.month(.abbreviated).day())) – \(last.formatted(.dateTime.month(.abbreviated).day()))"
+        }
+        return "\(event.start.formatted(.dateTime.weekday(.wide).month(.wide).day())) · \(event.start.formatted(date: .omitted, time: .shortened)) – \(event.end.formatted(date: .omitted, time: .shortened))"
+    }
+
     private var canEdit: Bool { store.calendars.first { $0.id == event.calendarID }?.canEdit == true }
     private var ownAttendance: EventAttendee? { event.attendees.first(where: \.isSelf) }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text(original.id.isEmpty ? "New event" : "Event").font(.headline)
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
-            }.padding(18)
-            Divider()
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text(original.id.isEmpty ? "NEW EVENT" : "EVENT").font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.secondary)
+                    Spacer()
+                    Button { dismiss() } label: { Image(systemName: "xmark") }.buttonStyle(QuietButtonStyle())
+                        .foregroundStyle(Theme.secondary).keyboardShortcut(.cancelAction).help("Close (Esc)")
+                }
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Circle().fill(calendarColor).frame(width: 12, height: 12)
+                    TextField("", text: $event.title, prompt: Text("Add a title").foregroundStyle(Theme.secondary.opacity(0.6)), axis: .vertical)
+                        .textFieldStyle(.plain).font(.system(size: 24, weight: .bold)).disabled(!canEdit || isSaving)
+                }
+                Text(whenText).font(.system(size: 13)).foregroundStyle(Theme.secondary)
+            }.padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 4)
             Form {
                 Section {
-                    TextField("Title", text: $event.title, prompt: Text("Add a title"))
                     Picker("Calendar", selection: $event.calendarID) {
                         ForEach(store.calendars.filter { $0.canEdit || $0.id == event.calendarID }) { calendar in
                             Text(calendar.title).tag(calendar.id)
@@ -74,40 +95,51 @@ struct CalendarEventEditor: View {
                 }.disabled(!canEdit || isSaving)
 
                 if let link = CalendarEventDetail.videoLink(for: event) {
-                    Section { Link(destination: link) { Label("Join call", systemImage: "video.fill").frame(maxWidth: .infinity) }.buttonStyle(.borderedProminent) }
+                    Section {
+                        Link(destination: link) {
+                            Label("Join call", systemImage: "video.fill").font(.system(size: 14, weight: .semibold))
+                                .frame(maxWidth: .infinity).padding(.vertical, 7)
+                                .background(Theme.yes, in: Capsule()).foregroundStyle(.white)
+                        }.buttonStyle(.plain)
+                    }
                 }
                 if !event.attendees.isEmpty {
                     Section("Guests") {
                         ForEach(event.attendees) { attendee in
-                            HStack {
+                            HStack(spacing: 10) {
+                                Avatar(name: attendee.name ?? attendee.email, key: attendee.email, size: 22)
                                 Text(attendee.name ?? attendee.email).textSelection(.enabled)
                                 Spacer()
                                 Text(attendee.response == .needsAction ? "No response" : attendee.response.rawValue.capitalized).foregroundStyle(.secondary).font(.caption)
                             }
                         }
                         if ownAttendance != nil {
-                            HStack {
+                            HStack(spacing: 8) {
+                                Text("Going?").foregroundStyle(Theme.secondary)
+                                Spacer()
                                 ForEach([AttendanceStatus.accepted, .tentative, .declined], id: \.self) { response in
-                                    Button(response == .accepted ? "Accept" : (response == .declined ? "Decline" : "Maybe")) {
+                                    let selected = ownAttendance?.response == response
+                                    let fill = response == .accepted ? Theme.yes : (response == .declined ? Theme.no : Theme.secondary)
+                                    Button(response == .accepted ? "Yes" : (response == .declined ? "No" : "Maybe")) {
                                         Task {
                                             if await store.respondToEvent(event, response: response) { dismiss() }
                                             else { failure = store.errorMessage ?? "Could not update your response." }
                                         }
-                                    }.buttonStyle(.bordered)
+                                    }.buttonStyle(PillButtonStyle(fill: selected ? fill : fill.opacity(0.25)))
                                 }
                             }
                         }
                     }
                 }
-            }.formStyle(.grouped)
-            Divider()
+            }.formStyle(.grouped).scrollContentBackground(.hidden)
             if let failure {
                 Text(failure).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 18).padding(.top, 10)
             }
             HStack {
                 if !original.id.isEmpty && canEdit {
-                    Button("Delete", role: .destructive) { asksDelete = true }
+                    Button { asksDelete = true } label: { Label("Delete", systemImage: "trash") }
+                        .buttonStyle(QuietButtonStyle()).foregroundStyle(Theme.no)
                 }
                 Spacer()
                 if isSaving { ProgressView().controlSize(.small) }
@@ -115,12 +147,13 @@ struct CalendarEventEditor: View {
                     Button(original.id.isEmpty ? "Create event" : "Save") {
                         if original.isRecurring { asksScope = true } else { save(.thisEvent) }
                     }
-                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .buttonStyle(PillButtonStyle(fill: Theme.accent)).keyboardShortcut(.defaultAction)
                     .disabled(isSaving || event.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || event.end <= event.start)
                 }
             }.padding(18).disabled(isSaving)
         }
-        .frame(width: 490, height: 610)
+        .frame(width: 490, height: 640)
+        .background(Theme.card)
         .confirmationDialog("Edit recurring event", isPresented: $asksScope, titleVisibility: .visible) {
             Button("This event") { save(.thisEvent) }
             Button("All events") { save(.allEvents) }

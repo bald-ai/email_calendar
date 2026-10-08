@@ -20,6 +20,7 @@ final class AppStore {
     var poweringThrough = false
     /// Set to ask the mail view to open a blank composer (from menus outside it).
     var composeRequest: UUID?
+    var isComposing = false
     var selectedEventID: String?
     var searchQuery = ""
     var isRefreshing = false

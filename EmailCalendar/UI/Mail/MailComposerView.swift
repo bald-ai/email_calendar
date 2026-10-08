@@ -65,8 +65,9 @@ struct MailComposition: Identifiable {
 
 struct MailComposerView: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.dismiss) private var dismiss
     let composition: MailComposition
+    /// Called instead of dismissing a sheet: the composer is a page in the main window.
+    var onClose: () -> Void = {}
     @State private var message: OutgoingMessage
     @State private var to: String
     @State private var cc: String
@@ -83,8 +84,9 @@ struct MailComposerView: View {
     @FocusState private var focus: Field?
     private enum Field { case to, cc, bcc, body }
 
-    init(composition: MailComposition) {
+    init(composition: MailComposition, onClose: @escaping () -> Void = {}) {
         self.composition = composition
+        self.onClose = onClose
         _message = State(initialValue: composition.message)
         _to = State(initialValue: composition.message.to.joined(separator: ", "))
         _cc = State(initialValue: composition.message.cc.joined(separator: ", "))
@@ -107,64 +109,89 @@ struct MailComposerView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(composition.title).font(.title3.weight(.semibold))
-                Spacer()
-                if isSaving { ProgressView().controlSize(.small); Text("Saving…").foregroundStyle(.secondary) }
-                else if let savedAt { Text("Saved \(savedAt, style: .time)").font(.caption).foregroundStyle(.secondary) }
-                Button("Save & close") { Task { await save(close: true) } }
+        ZStack(alignment: .bottom) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        Text(composition.title.uppercased()).font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.secondary)
+                        Spacer()
+                        if isSaving { ProgressView().controlSize(.small); Text("Saving…").font(.caption).foregroundStyle(Theme.secondary) }
+                        else if let savedAt { Text("Draft saved \(savedAt, style: .time)").font(.caption).foregroundStyle(Theme.secondary) }
+                    }.padding(.bottom, 18)
+                    TextField("", text: $message.subject, prompt: Text("Subject").foregroundStyle(Theme.secondary.opacity(0.6)), axis: .vertical)
+                        .textFieldStyle(.plain).font(.system(size: 30, weight: .bold)).padding(.bottom, 16)
+                    VStack(spacing: 10) {
+                        HStack(alignment: .firstTextBaseline) {
+                            recipientRow("To", value: $to, field: .to)
+                            Button(showsMoreRecipients ? "Hide Cc/Bcc" : "Cc/Bcc") { showsMoreRecipients.toggle() }
+                                .buttonStyle(QuietButtonStyle()).font(.system(size: 13)).foregroundStyle(Theme.secondary)
+                        }
+                        if showsMoreRecipients {
+                            recipientRow("Cc", value: $cc, field: .cc)
+                            recipientRow("Bcc", value: $bcc, field: .bcc)
+                        }
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 12)
+                    .background(Theme.raised, in: RoundedRectangle(cornerRadius: 12))
+                    TextEditor(text: $message.body)
+                        .font(.system(size: 15)).lineSpacing(3).scrollContentBackground(.hidden).focused($focus, equals: .body)
+                        .scrollDisabled(true)
+                        .frame(minHeight: 320).padding(.top, 18)
+                    if !message.attachments.isEmpty {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), alignment: .leading)], alignment: .leading, spacing: 8) {
+                            ForEach(message.attachments) { attachment in
+                                HStack(spacing: 8) {
+                                    Image(systemName: "doc").foregroundStyle(Theme.secondary)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(attachment.name).lineLimit(1)
+                                        Text(ByteCountFormatter.string(fromByteCount: Int64(attachment.data.count), countStyle: .file))
+                                            .font(.caption2).foregroundStyle(Theme.secondary)
+                                    }
+                                    Spacer(minLength: 4)
+                                    Button { message.attachments.removeAll { $0.id == attachment.id } } label: { Image(systemName: "xmark.circle.fill") }
+                                        .buttonStyle(QuietButtonStyle()).foregroundStyle(Theme.secondary).help("Remove attachment")
+                                }.font(.system(size: 13)).padding(10).background(Theme.raised, in: RoundedRectangle(cornerRadius: 10))
+                            }
+                        }.padding(.top, 10)
+                    }
+                    if let errorText {
+                        Text(errorText).font(.callout).foregroundStyle(Theme.no).padding(.top, 10)
+                    }
+                    Spacer(minLength: 120)
+                }
+                .padding(.horizontal, 48).padding(.top, 34)
+            }
+            .scrollIndicators(.never)
+            .frame(maxWidth: 790)
+            .background(Theme.card, in: UnevenRoundedRectangle(topLeadingRadius: 26, topTrailingRadius: 26))
+            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 26, topTrailingRadius: 26))
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 24)
+
+            HStack(spacing: 10) {
+                Button { Task { await send() } } label: {
+                    HStack(spacing: 6) {
+                        if isSending { ProgressView().controlSize(.small) } else { Image(systemName: "paperplane.fill") }
+                        Text("Send")
+                        Text("⌘↩").font(.system(size: 11, weight: .semibold)).opacity(0.7)
+                    }
+                }
+                .buttonStyle(PillButtonStyle(fill: canSend ? Theme.accent : Theme.accent.opacity(0.4)))
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!canSend || isSending || isSaving)
+                Button { showsImporter = true } label: { Label("Attach", systemImage: "paperclip") }
+                    .buttonStyle(PillButtonStyle(fill: .white.opacity(0.1)))
+                Button { Task { await save(close: true) } } label: { Label("Save & close", systemImage: "tray.and.arrow.down") }
+                    .buttonStyle(PillButtonStyle(fill: .white.opacity(0.1)))
                     .keyboardShortcut(.cancelAction)
                     .disabled(isSaving || isSending)
-            }.padding()
-            Divider()
-            VStack(spacing: 8) {
-                HStack {
-                    recipientRow("To", value: $to, field: .to)
-                    Button(showsMoreRecipients ? "Hide Cc/Bcc" : "Cc/Bcc") { showsMoreRecipients.toggle() }.buttonStyle(.borderless)
-                }
-                if showsMoreRecipients {
-                    recipientRow("Cc", value: $cc, field: .cc)
-                    recipientRow("Bcc", value: $bcc, field: .bcc)
-                }
-                HStack {
-                    Text("Subject").foregroundStyle(.secondary).frame(width: 54, alignment: .leading)
-                    TextField("Subject", text: $message.subject).textFieldStyle(.plain)
-                }
-            }.padding()
-            Divider()
-            TextEditor(text: $message.body)
-                .font(.body).scrollContentBackground(.hidden).focused($focus, equals: .body)
-                .padding(12).frame(minHeight: 260)
-            if !message.attachments.isEmpty {
-                ScrollView(.horizontal) {
-                    HStack {
-                        ForEach(message.attachments) { attachment in
-                            HStack(spacing: 6) {
-                                Image(systemName: "paperclip")
-                                Text(attachment.name).lineLimit(1)
-                                Text(ByteCountFormatter.string(fromByteCount: Int64(attachment.data.count), countStyle: .file)).foregroundStyle(.secondary)
-                                Button { message.attachments.removeAll { $0.id == attachment.id } } label: { Image(systemName: "xmark.circle.fill") }
-                                    .buttonStyle(.borderless).help("Remove attachment")
-                            }.font(.caption).padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
-                        }
-                    }.padding(.horizontal)
-                }.padding(.bottom, 10)
+                    .help("Saves a draft and closes (Esc)")
             }
-            if let errorText { Text(errorText).font(.callout).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.bottom, 8) }
-            Divider()
-            HStack {
-                Button { showsImporter = true } label: { Label("Attach", systemImage: "paperclip") }
-                Text("From \(store.accountEmail)").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Save draft") { Task { await save(close: false) } }.disabled(isSaving || isSending)
-                Button { Task { await send() } } label: {
-                    if isSending { ProgressView().controlSize(.small) } else { Label("Send", systemImage: "paperplane.fill") }
-                }.buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!canSend || isSending || isSaving)
-            }.padding()
+            .padding(8)
+            .background(Theme.actionBar, in: Capsule())
+            .shadow(color: .black.opacity(0.35), radius: 16, y: 6)
+            .padding(.bottom, 22)
         }
-        .frame(width: 720, height: 580)
         .disabled(isSending || isClosing)
         .interactiveDismissDisabled()
         .onAppear { focus = to.isEmpty ? .to : .body }
@@ -192,9 +219,13 @@ struct MailComposerView: View {
     }
 
     private func recipientRow(_ title: String, value: Binding<String>, field: Field) -> some View {
-        HStack {
-            Text(title).foregroundStyle(.secondary).frame(width: 54, alignment: .leading)
-            TextField("Email addresses, separated by commas", text: value).textFieldStyle(.plain).focused($focus, equals: field)
+        HStack(spacing: 10) {
+            Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.secondary).frame(width: 34, alignment: .leading)
+            ForEach(addresses(value.wrappedValue).prefix(4), id: \.self) { address in
+                Avatar(name: address, key: address.lowercased(), size: 20)
+            }
+            TextField("", text: value, prompt: Text("Email addresses, separated by commas").foregroundStyle(Theme.secondary.opacity(0.6)))
+                .textFieldStyle(.plain).font(.system(size: 14)).focused($focus, equals: field)
         }
     }
 
@@ -218,7 +249,7 @@ struct MailComposerView: View {
         saveTask?.cancel()
         let snapshot = outgoing
         if snapshot.to.isEmpty && snapshot.cc.isEmpty && snapshot.bcc.isEmpty && snapshot.subject.isEmpty && snapshot.body.isEmpty && snapshot.attachments.isEmpty {
-            if close { dismiss() }; return
+            if close { onClose() }; return
         }
         isSaving = true; isClosing = close; errorText = nil
         do {
@@ -226,7 +257,7 @@ struct MailComposerView: View {
             message.draftID = saved.draftID
             var savedSnapshot = snapshot; savedSnapshot.draftID = saved.draftID
             lastSaved = savedSnapshot; savedAt = .now; isSaving = false
-            if close { dismiss() }
+            if close { onClose() }
             else if outgoing != savedSnapshot { scheduleSave() }
         } catch {
             isSaving = false; isClosing = false; errorText = "Draft could not be saved: \(error.localizedDescription)"
@@ -237,7 +268,7 @@ struct MailComposerView: View {
     private func send() async {
         guard canSend, !isSaving, !isSending else { return }
         saveTask?.cancel(); isSending = true; errorText = nil
-        do { try await store.send(outgoing); dismiss() }
+        do { try await store.send(outgoing); onClose() }
         catch { isSending = false; errorText = error.localizedDescription; store.reportError(error) }
     }
 }
