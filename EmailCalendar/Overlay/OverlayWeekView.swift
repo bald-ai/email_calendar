@@ -9,6 +9,8 @@ struct OverlayWeekView: View {
     let onOpenInApp: (CalendarEvent?) -> Void
     let onResizeChanged: (CGFloat) -> Void
     let onResizeEnded: () -> Void
+    /// Asks the panel for room: in month view, enough height to show every event of the busiest day.
+    let onPreferredHeight: (CGFloat?) -> Void
 
     enum Mode: String, CaseIterable { case week = "Week", month = "Month" }
 
@@ -19,6 +21,7 @@ struct OverlayWeekView: View {
     @State private var weekFirstVisible = Date.now
     @State private var monthFocus = Date.now
     @State private var timelineDayWidth: CGFloat = 0
+    @State private var chromeHeight: CGFloat = 60
     @State private var selectedEvent: CalendarEvent?
     @State private var quickAddDate: Date?
     @State private var quickAddTitle = ""
@@ -33,9 +36,11 @@ struct OverlayWeekView: View {
     private let weeks: [Date]
 
     init(store: AppStore, onClose: @escaping () -> Void, onOpenInApp: @escaping (CalendarEvent?) -> Void,
-         onResizeChanged: @escaping (CGFloat) -> Void, onResizeEnded: @escaping () -> Void) {
+         onResizeChanged: @escaping (CGFloat) -> Void, onResizeEnded: @escaping () -> Void,
+         onPreferredHeight: @escaping (CGFloat?) -> Void = { _ in }) {
         self.store = store; self.onClose = onClose; self.onOpenInApp = onOpenInApp
         self.onResizeChanged = onResizeChanged; self.onResizeEnded = onResizeEnded
+        self.onPreferredHeight = onPreferredHeight
         let calendar = CalendarGeometry.calendar
         let thisWeek = calendar.dateInterval(of: .weekOfYear, for: .now)!.start
         let firstDay = calendar.date(byAdding: .weekOfYear, value: -8, to: thisWeek)!
@@ -49,12 +54,29 @@ struct OverlayWeekView: View {
         return store.events.filter { visible.contains($0.calendarID) && !$0.isCancelled }
     }
 
+    /// Month view: five rows, each tall enough for the busiest day of the month in view.
+    private var preferredHeight: CGFloat? {
+        guard mode == .month else { return nil }
+        let calendar = CalendarGeometry.calendar
+        guard let month = calendar.dateInterval(of: .month, for: monthFocus) else { return nil }
+        var busiest = 0
+        var day = month.start
+        while day < month.end {
+            busiest = max(busiest, visibleEvents.filter { CalendarGeometry.overlaps($0, day: day) }.count)
+            day = calendar.date(byAdding: .day, value: 1, to: day)!
+        }
+        return chromeHeight + OverlayMonth.weekdayHeight + 5 * OverlayMonth.rowHeight(fitting: busiest)
+    }
+
     private var animation: Animation? { reduceMotion ? nil : .smooth(duration: 0.35) }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            if let date = quickAddDate { quickAddBar(date) }
+            VStack(spacing: 0) {
+                header
+                if let date = quickAddDate { quickAddBar(date) }
+            }
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { chromeHeight = $0 + 9 }
             Group {
                 switch mode {
                 case .week:
@@ -87,6 +109,7 @@ struct OverlayWeekView: View {
             let span = DateInterval(start: weeks.first!, end: CalendarGeometry.calendar.date(byAdding: .weekOfYear, value: 1, to: weeks.last!)!)
             Task { await store.refreshCalendar(range: span) }
         }
+        .onChange(of: preferredHeight, initial: true) { _, height in onPreferredHeight(height) }
         .onKeyPress(.escape) {
             if quickAddDate != nil { quickAddDate = nil; overlayFocused = true } else { onClose() }
             return .handled
@@ -559,7 +582,11 @@ private struct OverlayMonth: View {
     var onEvent: (CalendarEvent) -> Void
     var onDay: (Date) -> Void
 
-    private let weekdayHeight: CGFloat = 24
+    static let weekdayHeight: CGFloat = 24
+    private var weekdayHeight: CGFloat { Self.weekdayHeight }
+
+    /// Day number row, then one 15pt line per event, plus a little breathing room.
+    static func rowHeight(fitting events: Int) -> CGFloat { 26 + CGFloat(max(2, events)) * 15 + 8 }
 
     var body: some View {
         GeometryReader { geometry in

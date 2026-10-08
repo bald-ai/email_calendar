@@ -36,6 +36,8 @@ final class OverlayController {
     @ObservationIgnored private var animationGeneration = 0
     @ObservationIgnored private var resizeInitialHeight: CGFloat?
     @ObservationIgnored private var restoreFocusAfterClosing = true
+    /// Height the content asked for (month view fitting its busiest day), or nil to use the user's height.
+    @ObservationIgnored private var contentHeight: CGFloat?
 
     init(store: AppStore) {
         self.store = store
@@ -98,7 +100,7 @@ final class OverlayController {
 
         let panel = self.panel ?? makePanel()
         self.panel = panel
-        let height = screen.frame.height * heightRatio(for: screen)
+        let height = fittedHeight(on: screen)
         let shownFrame = NSRect(
             x: screen.frame.minX,
             y: screen.frame.maxY - height,
@@ -245,7 +247,8 @@ final class OverlayController {
             onClose: { [weak self] in self?.close() },
             onOpenInApp: { [weak self] event in self?.openInMainApp(event: event) },
             onResizeChanged: { [weak self] translation in self?.resize(by: translation) },
-            onResizeEnded: { [weak self] in self?.finishResize() }
+            onResizeEnded: { [weak self] in self?.finishResize() },
+            onPreferredHeight: { [weak self] height in self?.fitContent(height) }
         ))
         host.translatesAutoresizingMaskIntoConstraints = false
         material.addSubview(host)
@@ -272,6 +275,27 @@ final class OverlayController {
             width: screen.frame.width,
             height: height
         ), display: true)
+    }
+
+    /// The user's height, stretched (never shrunk) to what the content needs, within 85% of the screen.
+    private func fittedHeight(on screen: NSScreen) -> CGFloat {
+        let base = screen.frame.height * heightRatio(for: screen)
+        guard let contentHeight else { return base }
+        return max(base, min(contentHeight, screen.frame.height * 0.85))
+    }
+
+    private func fitContent(_ height: CGFloat?) {
+        contentHeight = height
+        guard isOpen, resizeInitialHeight == nil, let panel, let screen = selectedScreen else { return }
+        let target = fittedHeight(on: screen)
+        guard abs(target - panel.frame.height) > 1 else { return }
+        let frame = NSRect(x: screen.frame.minX, y: screen.frame.maxY - target, width: screen.frame.width, height: target)
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = reduceMotion ? 0 : 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(frame, display: true)
+        }
     }
 
     private func finishResize() {
