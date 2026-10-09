@@ -100,6 +100,10 @@ final class OverlayController {
 
         let panel = self.panel ?? makePanel()
         self.panel = panel
+        // Month view opens already stretched, instead of growing after it appears.
+        contentHeight = UserDefaults.standard.string(forKey: "overlay.mode") == OverlayWeekView.Mode.month.rawValue
+            ? OverlayWeekView.monthHeight(index: CalendarGeometry.DayIndex(OverlayWeekView.visibleEvents(store)), month: .now)
+            : nil
         let height = fittedHeight(on: screen)
         let shownFrame = NSRect(
             x: screen.frame.minX,
@@ -288,14 +292,9 @@ final class OverlayController {
         contentHeight = height
         guard isOpen, resizeInitialHeight == nil, let panel, let screen = selectedScreen else { return }
         let target = fittedHeight(on: screen)
-        guard abs(target - panel.frame.height) > 1 else { return }
-        let frame = NSRect(x: screen.frame.minX, y: screen.frame.maxY - target, width: screen.frame.width, height: target)
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = reduceMotion ? 0 : 0.22
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            panel.animator().setFrame(frame, display: true)
-        }
+        guard abs(target - panel.frame.height) > 4 else { return }
+        // Instant: animating the frame relays out the whole grid on every animation frame.
+        panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.maxY - target, width: screen.frame.width, height: target), display: true)
     }
 
     private func finishResize() {

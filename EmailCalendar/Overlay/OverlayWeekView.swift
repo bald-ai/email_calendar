@@ -17,9 +17,12 @@ struct OverlayWeekView: View {
     @AppStorage("overlay.mode") private var mode: Mode = .week
     @State private var weekPosition = ScrollPosition()
     @State private var hourPosition = ScrollPosition()
-    @State private var monthPosition = ScrollPosition(idType: Date.self)
+    @State private var monthRequest: OverlayMonth.Request?
     @State private var weekFirstVisible = Date.now
     @State private var monthFocus = Date.now
+    /// The month the window is sized for. Set by opening, Today and the arrows, not by free
+    /// scrolling, so rows never change height under your fingers.
+    @State private var sizedMonth = Date.now
     @State private var timelineDayWidth: CGFloat = 0
     @State private var chromeHeight: CGFloat = 60
     @State private var index = CalendarGeometry.DayIndex()
@@ -53,22 +56,31 @@ struct OverlayWeekView: View {
     private var visibleEvents: [CalendarEvent] { index.all }
 
     private func rebuildIndex() {
-        let visible = Set(store.calendars.filter(\.isVisible).map(\.id))
-        index = CalendarGeometry.DayIndex(store.events.filter { visible.contains($0.calendarID) && !$0.isCancelled })
+        index = CalendarGeometry.DayIndex(Self.visibleEvents(store))
     }
 
     /// Month view: five rows, each tall enough for the busiest day of the month in view.
     private var preferredHeight: CGFloat? {
         guard mode == .month else { return nil }
+        return Self.monthHeight(index: index, month: sizedMonth, chrome: chromeHeight)
+    }
+
+    /// Also used by the panel before it opens, so month view appears already stretched.
+    static func monthHeight(index: CalendarGeometry.DayIndex, month: Date, chrome: CGFloat = 56) -> CGFloat {
         let calendar = CalendarGeometry.calendar
-        guard let month = calendar.dateInterval(of: .month, for: monthFocus) else { return nil }
+        guard let interval = calendar.dateInterval(of: .month, for: month) else { return 0 }
         var busiest = 0
-        var day = month.start
-        while day < month.end {
+        var day = interval.start
+        while day < interval.end {
             busiest = max(busiest, index.events(on: day).count)
             day = calendar.date(byAdding: .day, value: 1, to: day)!
         }
-        return chromeHeight + OverlayMonth.weekdayHeight + 5 * OverlayMonth.rowHeight(fitting: busiest)
+        return chrome + OverlayMonth.weekdayHeight + 5 * OverlayMonth.rowHeight(fitting: busiest)
+    }
+
+    static func visibleEvents(_ store: AppStore) -> [CalendarEvent] {
+        let visible = Set(store.calendars.filter(\.isVisible).map(\.id))
+        return store.events.filter { visible.contains($0.calendarID) && !$0.isCancelled }
     }
 
     private var animation: Animation? { reduceMotion ? nil : .smooth(duration: 0.35) }
@@ -88,7 +100,7 @@ struct OverlayWeekView: View {
                                     firstVisible: $weekFirstVisible, dayWidth: $timelineDayWidth,
                                     onEvent: { selectedEvent = $0 }, onEmptySlot: beginQuickAdd)
                 case .month:
-                    OverlayMonth(weeks: weeks, index: index, calendars: store.calendars, position: $monthPosition,
+                    OverlayMonth(weeks: weeks, index: index, calendars: store.calendars, request: monthRequest,
                                  focusMonth: $monthFocus, onEvent: { selectedEvent = $0 }, onDay: openWeek)
                 }
             }
@@ -296,8 +308,9 @@ struct OverlayWeekView: View {
         let week = calendar.dateInterval(of: .weekOfYear, for: target)!.start
         let row = calendar.date(byAdding: .weekOfYear, value: -1, to: week)!
         guard let id = weeks.first(where: { calendar.isDate($0, inSameDayAs: row) }) else { return }
-        withAnimation(animated ? animation : nil) { monthPosition.scrollTo(id: id, anchor: .top) }
+        monthRequest = OverlayMonth.Request(week: id, animated: animated && !reduceMotion)
         monthFocus = target
+        sizedMonth = target
     }
 
     private func openWeek(_ day: Date) {
@@ -578,14 +591,22 @@ private struct OverlayDayColumn: View {
 // MARK: - Month
 
 /// Weeks flow continuously; months are told apart by shading and a label on the 1st.
+/// Scrolling stays inside this view, and each week row redraws only when its own days change.
 private struct OverlayMonth: View {
+    struct Request: Equatable {
+        let id = UUID()
+        var week: Date
+        var animated: Bool
+    }
+
     let weeks: [Date]
     let index: CalendarGeometry.DayIndex
     let calendars: [CalendarRecord]
-    @Binding var position: ScrollPosition
+    let request: Request?
     @Binding var focusMonth: Date
     var onEvent: (CalendarEvent) -> Void
     var onDay: (Date) -> Void
+    @State private var position = ScrollPosition(idType: Date.self)
 
     static let weekdayHeight: CGFloat = 24
     private var weekdayHeight: CGFloat { Self.weekdayHeight }
@@ -595,8 +616,10 @@ private struct OverlayMonth: View {
     static func rowHeight(fitting events: Int) -> CGFloat { 30 + CGFloat(max(2, events)) * lineHeight + 6 }
 
     var body: some View {
+        let colors = Dictionary(calendars.map { ($0.id, $0.colorHex) }, uniquingKeysWith: { first, _ in first })
+        let focusKey = CalendarGeometry.calendar.component(.year, from: focusMonth) * 12 + CalendarGeometry.calendar.component(.month, from: focusMonth)
         GeometryReader { geometry in
-            let rowHeight = max(54, (geometry.size.height - weekdayHeight) / 5)
+            let rowHeight = max(54, ((geometry.size.height - weekdayHeight) / 5).rounded(.down))
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
                     ForEach(0..<7, id: \.self) { offset in
@@ -610,85 +633,124 @@ private struct OverlayMonth: View {
                 ScrollView(.vertical) {
                     LazyVStack(spacing: 0) {
                         ForEach(weeks, id: \.self) { week in
-                            weekRow(week, height: rowHeight).id(week)
+                            MonthWeekRow(week: week, days: MonthWeekRow.days(week: week, index: index, colors: colors),
+                                         focusKey: focusKey, height: rowHeight, onEvent: onEvent, onDay: onDay)
+                                .equatable()
+                                .id(week)
                         }
                     }
                     .scrollTargetLayout()
                 }
                 .scrollIndicators(.never)
                 .scrollPosition($position)
-                .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { _, y in
+                .onScrollGeometryChange(for: Int.self, of: { Int(($0.contentOffset.y / rowHeight).rounded()) }) { _, row in
                     // The month of the second visible row's middle day names what you're looking at.
-                    let index = min(weeks.count - 1, max(0, Int((y / rowHeight).rounded()) + 1))
+                    let index = min(weeks.count - 1, max(0, row + 1))
                     let middle = CalendarGeometry.calendar.date(byAdding: .day, value: 3, to: weeks[index])!
                     if !CalendarGeometry.calendar.isDate(middle, equalTo: focusMonth, toGranularity: .month) { focusMonth = middle }
                 }
             }
         }
+        .onChange(of: request, initial: true) { _, request in
+            guard let request else { return }
+            withAnimation(request.animated ? .smooth(duration: 0.35) : nil) { position.scrollTo(id: request.week, anchor: .top) }
+        }
+    }
+}
+
+private struct MonthWeekRow: View, Equatable {
+    struct Chip: Equatable { var id: String; var title: String; var allDay: Bool; var hex: String; var event: CalendarEvent }
+    struct Day: Equatable { var date: Date; var number: Int; var month: Int; var isToday: Bool; var chips: [Chip] }
+
+    let week: Date
+    let days: [Day]
+    let focusKey: Int
+    let height: CGFloat
+    var onEvent: (CalendarEvent) -> Void
+    var onDay: (Date) -> Void
+
+    /// Closures are left out on purpose: a row only redraws when what it shows changes.
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.week == rhs.week && lhs.days == rhs.days && lhs.focusKey == rhs.focusKey && lhs.height == rhs.height
     }
 
-    private func weekRow(_ week: Date, height: CGFloat) -> some View {
+    static func days(week: Date, index: CalendarGeometry.DayIndex, colors: [String: String]) -> [Day] {
+        let calendar = CalendarGeometry.calendar
+        return (0..<7).map { offset in
+            let date = calendar.date(byAdding: .day, value: offset, to: week)!
+            return Day(date: date, number: calendar.component(.day, from: date), month: calendar.component(.month, from: date),
+                       isToday: calendar.isDateInToday(date),
+                       chips: index.events(on: date).map { event in
+                           Chip(id: event.cacheID, title: event.title, allDay: event.isAllDay,
+                                hex: colors[event.calendarID] ?? "#6586B5", event: event)
+                       })
+        }
+    }
+
+    var body: some View {
         HStack(spacing: 0) {
-            ForEach(0..<7, id: \.self) { offset in
-                dayCell(CalendarGeometry.calendar.date(byAdding: .day, value: offset, to: week)!, height: height)
+            ForEach(days, id: \.date) { day in
+                // Cells skip redrawing; crossing into another month only changes their opacity.
+                MonthDayCell(day: day, height: height, onEvent: onEvent, onDay: onDay)
+                    .equatable()
+                    .opacity(CalendarGeometry.calendar.component(.year, from: day.date) * 12 + day.month == focusKey ? 1 : 0.55)
             }
         }
         .frame(height: height)
     }
+}
 
-    private func dayCell(_ day: Date, height: CGFloat) -> some View {
-        let calendar = CalendarGeometry.calendar
-        let isToday = calendar.isDateInToday(day)
-        let dayNumber = calendar.component(.day, from: day)
-        let inFocus = calendar.isDate(day, equalTo: focusMonth, toGranularity: .month)
-        let shaded = calendar.component(.month, from: day) % 2 == 0
-        let dayEvents = index.events(on: day)
-        let shown = min(dayEvents.count, max(1, Int((height - 30) / Self.lineHeight)))
+private struct MonthDayCell: View, Equatable {
+    let day: MonthWeekRow.Day
+    let height: CGFloat
+    var onEvent: (CalendarEvent) -> Void
+    var onDay: (Date) -> Void
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool { lhs.day == rhs.day && lhs.height == rhs.height }
+
+    var body: some View {
+        let shown = min(day.chips.count, max(1, Int((height - 30) / OverlayMonth.lineHeight)))
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
-                Text("\(dayNumber)")
-                    .font(.system(size: 12, weight: isToday || dayNumber == 1 ? .bold : .medium))
-                    .foregroundStyle(isToday ? .white : Theme.text)
+                Text("\(day.number)")
+                    .font(.system(size: 12, weight: day.isToday || day.number == 1 ? .bold : .medium))
+                    .foregroundStyle(day.isToday ? .white : Theme.text)
                     .frame(minWidth: 20, minHeight: 20)
-                    .background(isToday ? Theme.accent : .clear, in: Circle())
-                if dayNumber == 1 {
-                    Text(day.formatted(.dateTime.month(.abbreviated))).font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.accent)
+                    .background(day.isToday ? Theme.accent : .clear, in: Circle())
+                if day.number == 1 {
+                    Text(day.date.formatted(.dateTime.month(.abbreviated))).font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.accent)
                 }
                 Spacer(minLength: 0)
-                if dayEvents.count > shown {
-                    Text("+\(dayEvents.count - shown)").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.secondary)
+                if day.chips.count > shown {
+                    Text("+\(day.chips.count - shown)").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.secondary)
                 }
             }
-            ForEach(dayEvents.prefix(shown), id: \.cacheID) { event in
-                let hex = calendars.first { $0.id == event.calendarID }?.colorHex ?? "#6586B5"
-                Button { onEvent(event) } label: {
-                    HStack(spacing: 4) {
-                        if event.isAllDay {
-                            Text(event.title).lineLimit(1).padding(.horizontal, 4).frame(maxWidth: .infinity, alignment: .leading)
-                                .foregroundStyle(CalendarGeometry.textColor(hex))
-                                .background(CalendarGeometry.color(hex), in: RoundedRectangle(cornerRadius: 3))
-                        } else {
-                            Circle().fill(CalendarGeometry.color(hex)).frame(width: 6, height: 6)
-                            Text(event.title).lineLimit(1)
-                            Spacer(minLength: 0)
-                        }
+            ForEach(day.chips.prefix(shown), id: \.id) { chip in
+                HStack(spacing: 4) {
+                    if chip.allDay {
+                        Text(chip.title).lineLimit(1).padding(.horizontal, 4).frame(maxWidth: .infinity, alignment: .leading)
+                            .foregroundStyle(CalendarGeometry.textColor(chip.hex))
+                            .background(CalendarGeometry.color(chip.hex), in: RoundedRectangle(cornerRadius: 3))
+                    } else {
+                        Circle().fill(CalendarGeometry.color(chip.hex)).frame(width: 6, height: 6)
+                        Text(chip.title).lineLimit(1)
+                        Spacer(minLength: 0)
                     }
-                    .font(.system(size: 10.5, weight: .medium)).frame(height: 14).contentShape(Rectangle())
-                }.buttonStyle(.plain)
+                }
+                .font(.system(size: 10.5, weight: .medium)).frame(height: 14).contentShape(Rectangle())
+                .onTapGesture { onEvent(chip.event) }
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 6).padding(.top, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .clipped()
-        .background(shaded ? Color.white.opacity(0.025) : .clear)
-        .background(isToday ? Theme.accent.opacity(0.08) : .clear)
+        .background(day.month % 2 == 0 ? Color.white.opacity(0.025) : .clear)
+        .background(day.isToday ? Theme.accent.opacity(0.08) : .clear)
         .overlay(alignment: .top) { Rectangle().fill(Theme.line.opacity(0.6)).frame(height: 0.5) }
-        .overlay(alignment: .leading) { Rectangle().fill(Theme.line.opacity(dayNumber == 1 ? 1 : 0.5)).frame(width: dayNumber == 1 ? 1.5 : 0.5) }
-        .opacity(inFocus ? 1 : 0.55)
+        .overlay(alignment: .leading) { Rectangle().fill(Theme.line.opacity(day.number == 1 ? 1 : 0.5)).frame(width: day.number == 1 ? 1.5 : 0.5) }
         .contentShape(Rectangle())
-        .onTapGesture { onDay(day) }
-        .help("Open the week of \(day.formatted(.dateTime.month(.abbreviated).day()))")
+        .onTapGesture { onDay(day.date) }
     }
 }
 #endif

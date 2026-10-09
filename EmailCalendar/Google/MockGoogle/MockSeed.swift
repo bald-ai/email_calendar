@@ -144,9 +144,15 @@ enum MockSeed {
         return arrival
     }
 
-    /// About five months either side of today, two to seven entries per day, so the
-    /// calendar views can be judged with a realistically full schedule.
+    /// This month full (three to six entries on weekdays) and next month lighter (one to
+    /// three), so the calendar views can be judged with a realistic schedule. Replaces the
+    /// earlier five-month batch: those events are deleted, so synced caches drop them too.
     static func addBusyCalendar(into state: inout MockState, now: Date) {
+        for index in state.events.indices where state.events[index].event.id.hasPrefix("busy") && !state.events[index].deleted {
+            state.events[index].deleted = true
+            state.calendarVersion += 1
+            state.events[index].version = state.calendarVersion
+        }
         let calendar = Calendar.current
         let zone = TimeZone.current.identifier
         let iso = ISO8601DateFormatter()
@@ -157,46 +163,44 @@ enum MockSeed {
         let mine = MockGoogleBackend.accountEmail, work = "work@group.calendar.google.com"
         let family = "family@group.calendar.google.com"
         let workTitles = ["Design crit", "Sprint planning", "1:1 with Maya", "Customer call", "Code review", "Hiring panel",
-                          "Roadmap review", "Retro", "Pairing with Sam", "Vendor call", "All-hands prep", "Bug triage", "Interview"]
-        let personalTitles = ["Run", "Groceries", "Haircut", "Coffee with Tom", "Therapy", "Laundry", "Call Mom",
-                              "Reading hour", "Yoga", "Bike repair", "Pharmacy", "Swim"]
-        let familyTitles = ["Dinner at Mom's", "Kids pickup", "Birthday party", "Movie night", "Brunch", "Zoo trip"]
-        let allDayTitles = ["Conference", "Offsite", "Team trip", "Public holiday", "Moving day"]
+                          "Roadmap review", "Retro", "Pairing with Sam", "Vendor call", "Bug triage", "Interview"]
+        let personalTitles = ["Run", "Groceries", "Haircut", "Coffee with Tom", "Therapy", "Call Mom", "Yoga", "Swim"]
+        let familyTitles = ["Dinner at Mom's", "Birthday party", "Movie night", "Brunch"]
         var seed: UInt64 = 0x9E3779B97F4A7C15
         func next(_ bound: Int) -> Int {
             seed = seed &* 6364136223846793005 &+ 1442695040888963407
             return Int((seed >> 33) % UInt64(bound))
         }
-        let today = calendar.startOfDay(for: now)
-        for offset in -150...150 {
-            let day = calendar.date(byAdding: .day, value: offset, to: today)!
+        let thisMonth = calendar.dateInterval(of: .month, for: now)!
+        let nextMonth = calendar.dateInterval(of: .month, for: thisMonth.end)!
+        var day = thisMonth.start
+        while day < nextMonth.end {
+            let full = day < thisMonth.end
             let weekend = calendar.isDateInWeekend(day)
             var entries: [(String, String)] = []
-            if !weekend { for _ in 0..<(2 + next(4)) { entries.append((work, workTitles[next(workTitles.count)])) } }
-            for _ in 0..<next(weekend ? 3 : 2) { entries.append((mine, personalTitles[next(personalTitles.count)])) }
-            if weekend || next(5) == 0 { entries.append((family, familyTitles[next(familyTitles.count)])) }
+            if weekend {
+                for _ in 0..<(full ? 1 + next(2) : next(2)) {
+                    entries.append(next(2) == 0 ? (family, familyTitles[next(familyTitles.count)]) : (mine, personalTitles[next(personalTitles.count)]))
+                }
+            } else {
+                for _ in 0..<(full ? 2 + next(3) : 1 + next(2)) { entries.append((work, workTitles[next(workTitles.count)])) }
+                if full && next(2) == 0 { entries.append((mine, personalTitles[next(personalTitles.count)])) }
+            }
+            let key = dayFormatter.string(from: day)
             for (index, entry) in entries.enumerated() {
-                let hour = min(20, 8 + index * 2 + next(2))
+                let hour = min(19, 9 + index * 2 + next(2))
                 let start = calendar.date(bySettingHour: hour, minute: next(2) * 30, second: 0, of: day)!
                 let minutes = [30, 45, 60, 90][next(4)]
-                var event = GoogleEvent(id: "busy\(offset + 200)x\(index)", summary: entry.1,
+                var event = GoogleEvent(id: "busy3\(key.replacingOccurrences(of: "-", with: ""))x\(index)", summary: entry.1,
                                         start: GoogleEventDateTime(dateTime: iso.string(from: start), timeZone: zone),
                                         end: GoogleEventDateTime(dateTime: iso.string(from: start.addingTimeInterval(Double(minutes) * 60)), timeZone: zone))
                 event.status = "confirmed"
-                event.etag = "\"busy\(offset)-\(index)\""
-                if entry.0 == work && next(3) == 0 { event.hangoutLink = "https://meet.google.com/busy-\(offset + 200)-\(index)" }
+                event.etag = "\"busy3-\(key)-\(index)\""
+                if entry.0 == work && next(3) == 0 { event.hangoutLink = "https://meet.google.com/busy-\(key)-\(index)" }
                 state.calendarVersion += 1
                 state.events.append(MockEvent(calendarID: entry.0, event: event, version: state.calendarVersion))
             }
-            if next(11) == 0 {
-                let length = 1 + next(3)
-                var event = GoogleEvent(id: "busy\(offset + 200)allday", summary: allDayTitles[next(allDayTitles.count)],
-                                        start: GoogleEventDateTime(date: dayFormatter.string(from: day)),
-                                        end: GoogleEventDateTime(date: dayFormatter.string(from: calendar.date(byAdding: .day, value: length, to: day)!)))
-                event.status = "confirmed"
-                state.calendarVersion += 1
-                state.events.append(MockEvent(calendarID: [work, family][next(2)], event: event, version: state.calendarVersion))
-            }
+            day = calendar.date(byAdding: .day, value: 1, to: day)!
         }
     }
 
