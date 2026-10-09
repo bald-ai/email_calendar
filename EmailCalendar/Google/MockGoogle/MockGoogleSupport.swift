@@ -15,6 +15,8 @@ struct MockState: Codable {
     var calendarVersion = 0
     var simulatedCount = 0
     var firstArrivalsDelivered = false
+    /// nil for data saved before the busy calendar existed; optional so older files still decode.
+    var seedVersion: Int?
 
     func thread(_ id: String) -> [MockMessage] {
         messages.values.filter { $0.threadId == id }.sorted { $0.internalDate < $1.internalDate }

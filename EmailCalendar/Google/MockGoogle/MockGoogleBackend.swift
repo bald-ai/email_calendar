@@ -26,6 +26,11 @@ public final class MockGoogleBackend: @unchecked Sendable {
         } else {
             state = MockSeed.make(now: now)
         }
+        if (state.seedVersion ?? 1) < 2 {
+            // Existing demo data gets the busier calendar too, without a reset.
+            MockSeed.addBusyCalendar(into: &state, now: now)
+            state.seedVersion = 2
+        }
         persist()
     }
 

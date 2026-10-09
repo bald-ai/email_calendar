@@ -2,11 +2,41 @@
 import SwiftUI
 
 enum CalendarGeometry {
-    static var calendar: Calendar {
+    /// Built once: the grids call date math thousands of times while scrolling.
+    static let calendar: Calendar = {
         var result = Calendar.current
         result.firstWeekday = 2
         result.minimumDaysInFirstWeek = 4
         return result
+    }()
+
+    /// Events grouped by the days they touch, so a grid cell looks up its day instead of
+    /// scanning every event.
+    struct DayIndex {
+        private(set) var all: [CalendarEvent] = []
+        private var byDay: [Date: [CalendarEvent]] = [:]
+
+        init(_ events: [CalendarEvent] = []) {
+            all = events
+            let calendar = CalendarGeometry.calendar
+            for event in events {
+                var day = calendar.startOfDay(for: event.start)
+                let last = max(event.start, event.end.addingTimeInterval(-1))
+                var count = 0
+                while day <= last && count < 400 {
+                    byDay[day, default: []].append(event)
+                    day = calendar.date(byAdding: .day, value: 1, to: day)!
+                    count += 1
+                }
+            }
+            for key in byDay.keys {
+                byDay[key]!.sort { ($0.isAllDay ? 0 : 1, $0.start) < ($1.isAllDay ? 0 : 1, $1.start) }
+            }
+        }
+
+        func events(on day: Date) -> [CalendarEvent] {
+            byDay[CalendarGeometry.calendar.startOfDay(for: day)] ?? []
+        }
     }
 
     static func days(inWeekContaining date: Date) -> [Date] {

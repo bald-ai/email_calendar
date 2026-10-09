@@ -22,6 +22,7 @@ struct OverlayWeekView: View {
     @State private var monthFocus = Date.now
     @State private var timelineDayWidth: CGFloat = 0
     @State private var chromeHeight: CGFloat = 60
+    @State private var index = CalendarGeometry.DayIndex()
     @State private var selectedEvent: CalendarEvent?
     @State private var quickAddDate: Date?
     @State private var quickAddTitle = ""
@@ -49,9 +50,11 @@ struct OverlayWeekView: View {
         weeks = (0..<78).map { calendar.date(byAdding: .weekOfYear, value: $0, to: firstWeek)! }
     }
 
-    private var visibleEvents: [CalendarEvent] {
+    private var visibleEvents: [CalendarEvent] { index.all }
+
+    private func rebuildIndex() {
         let visible = Set(store.calendars.filter(\.isVisible).map(\.id))
-        return store.events.filter { visible.contains($0.calendarID) && !$0.isCancelled }
+        index = CalendarGeometry.DayIndex(store.events.filter { visible.contains($0.calendarID) && !$0.isCancelled })
     }
 
     /// Month view: five rows, each tall enough for the busiest day of the month in view.
@@ -62,7 +65,7 @@ struct OverlayWeekView: View {
         var busiest = 0
         var day = month.start
         while day < month.end {
-            busiest = max(busiest, visibleEvents.filter { CalendarGeometry.overlaps($0, day: day) }.count)
+            busiest = max(busiest, index.events(on: day).count)
             day = calendar.date(byAdding: .day, value: 1, to: day)!
         }
         return chromeHeight + OverlayMonth.weekdayHeight + 5 * OverlayMonth.rowHeight(fitting: busiest)
@@ -80,12 +83,12 @@ struct OverlayWeekView: View {
             Group {
                 switch mode {
                 case .week:
-                    OverlayTimeline(days: days, events: visibleEvents, calendars: store.calendars,
+                    OverlayTimeline(days: days, index: index, calendars: store.calendars,
                                     dayPosition: $weekPosition, hourPosition: $hourPosition,
                                     firstVisible: $weekFirstVisible, dayWidth: $timelineDayWidth,
                                     onEvent: { selectedEvent = $0 }, onEmptySlot: beginQuickAdd)
                 case .month:
-                    OverlayMonth(weeks: weeks, events: visibleEvents, calendars: store.calendars, position: $monthPosition,
+                    OverlayMonth(weeks: weeks, index: index, calendars: store.calendars, position: $monthPosition,
                                  focusMonth: $monthFocus, onEvent: { selectedEvent = $0 }, onDay: openWeek)
                 }
             }
@@ -109,6 +112,8 @@ struct OverlayWeekView: View {
             let span = DateInterval(start: weeks.first!, end: CalendarGeometry.calendar.date(byAdding: .weekOfYear, value: 1, to: weeks.last!)!)
             Task { await store.refreshCalendar(range: span) }
         }
+        .onChange(of: store.events, initial: true) { rebuildIndex() }
+        .onChange(of: store.calendars) { rebuildIndex() }
         .onChange(of: preferredHeight, initial: true) { _, height in onPreferredHeight(height) }
         .onKeyPress(.escape) {
             if quickAddDate != nil { quickAddDate = nil; overlayFocused = true } else { onClose() }
@@ -350,7 +355,7 @@ struct OverlayWeekView: View {
 /// inside them, and the day names above follow the horizontal scroll.
 private struct OverlayTimeline: View {
     let days: [Date]
-    let events: [CalendarEvent]
+    let index: CalendarGeometry.DayIndex
     let calendars: [CalendarRecord]
     @Binding var dayPosition: ScrollPosition
     @Binding var hourPosition: ScrollPosition
@@ -388,7 +393,7 @@ private struct OverlayTimeline: View {
                         ScrollView(.horizontal) {
                             LazyHStack(spacing: 0) {
                                 ForEach(days, id: \.self) { day in
-                                    OverlayDayColumn(day: day, events: events, calendars: calendars, width: width,
+                                    OverlayDayColumn(day: day, events: index.events(on: day), calendars: calendars, width: width,
                                                      hourHeight: Self.hourHeight, onEvent: onEvent, onEmptySlot: onEmptySlot)
                                 }
                             }
@@ -456,7 +461,7 @@ private struct OverlayTimeline: View {
     private func dayHeader(_ day: Date, width: CGFloat) -> some View {
         let calendar = Calendar.current
         let isToday = calendar.isDateInToday(day)
-        let allDay = events.filter { $0.isAllDay && CalendarGeometry.overlaps($0, day: day) }
+        let allDay = index.events(on: day).filter(\.isAllDay)
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
                 Text(day.formatted(.dateTime.weekday(.abbreviated))).foregroundStyle(isToday ? Theme.accent : Theme.secondary)
@@ -575,7 +580,7 @@ private struct OverlayDayColumn: View {
 /// Weeks flow continuously; months are told apart by shading and a label on the 1st.
 private struct OverlayMonth: View {
     let weeks: [Date]
-    let events: [CalendarEvent]
+    let index: CalendarGeometry.DayIndex
     let calendars: [CalendarRecord]
     @Binding var position: ScrollPosition
     @Binding var focusMonth: Date
@@ -585,8 +590,9 @@ private struct OverlayMonth: View {
     static let weekdayHeight: CGFloat = 24
     private var weekdayHeight: CGFloat { Self.weekdayHeight }
 
-    /// Day number row, then one 15pt line per event, plus a little breathing room.
-    static func rowHeight(fitting events: Int) -> CGFloat { 26 + CGFloat(max(2, events)) * 15 + 8 }
+    /// Day number row, then one 16pt line per event (14pt text plus 2pt spacing), plus breathing room.
+    static let lineHeight: CGFloat = 16
+    static func rowHeight(fitting events: Int) -> CGFloat { 30 + CGFloat(max(2, events)) * lineHeight + 6 }
 
     var body: some View {
         GeometryReader { geometry in
@@ -610,7 +616,6 @@ private struct OverlayMonth: View {
                     .scrollTargetLayout()
                 }
                 .scrollIndicators(.never)
-                .scrollTargetBehavior(.viewAligned)
                 .scrollPosition($position)
                 .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { _, y in
                     // The month of the second visible row's middle day names what you're looking at.
@@ -637,9 +642,8 @@ private struct OverlayMonth: View {
         let dayNumber = calendar.component(.day, from: day)
         let inFocus = calendar.isDate(day, equalTo: focusMonth, toGranularity: .month)
         let shaded = calendar.component(.month, from: day) % 2 == 0
-        let dayEvents = events.filter { CalendarGeometry.overlaps($0, day: day) }
-            .sorted { ($0.isAllDay ? 0 : 1, $0.start) < ($1.isAllDay ? 0 : 1, $1.start) }
-        let shown = min(dayEvents.count, max(1, Int((height - 26) / 15)))
+        let dayEvents = index.events(on: day)
+        let shown = min(dayEvents.count, max(1, Int((height - 30) / Self.lineHeight)))
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
                 Text("\(dayNumber)")
@@ -676,6 +680,7 @@ private struct OverlayMonth: View {
         }
         .padding(.horizontal, 6).padding(.top, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .clipped()
         .background(shaded ? Color.white.opacity(0.025) : .clear)
         .background(isToday ? Theme.accent.opacity(0.08) : .clear)
         .overlay(alignment: .top) { Rectangle().fill(Theme.line.opacity(0.6)).frame(height: 0.5) }

@@ -144,6 +144,62 @@ enum MockSeed {
         return arrival
     }
 
+    /// About five months either side of today, two to seven entries per day, so the
+    /// calendar views can be judged with a realistically full schedule.
+    static func addBusyCalendar(into state: inout MockState, now: Date) {
+        let calendar = Calendar.current
+        let zone = TimeZone.current.identifier
+        let iso = ISO8601DateFormatter()
+        let dayFormatter = DateFormatter()
+        dayFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dayFormatter.calendar = Calendar(identifier: .gregorian)
+        dayFormatter.dateFormat = "yyyy-MM-dd"
+        let mine = MockGoogleBackend.accountEmail, work = "work@group.calendar.google.com"
+        let family = "family@group.calendar.google.com"
+        let workTitles = ["Design crit", "Sprint planning", "1:1 with Maya", "Customer call", "Code review", "Hiring panel",
+                          "Roadmap review", "Retro", "Pairing with Sam", "Vendor call", "All-hands prep", "Bug triage", "Interview"]
+        let personalTitles = ["Run", "Groceries", "Haircut", "Coffee with Tom", "Therapy", "Laundry", "Call Mom",
+                              "Reading hour", "Yoga", "Bike repair", "Pharmacy", "Swim"]
+        let familyTitles = ["Dinner at Mom's", "Kids pickup", "Birthday party", "Movie night", "Brunch", "Zoo trip"]
+        let allDayTitles = ["Conference", "Offsite", "Team trip", "Public holiday", "Moving day"]
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        func next(_ bound: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Int((seed >> 33) % UInt64(bound))
+        }
+        let today = calendar.startOfDay(for: now)
+        for offset in -150...150 {
+            let day = calendar.date(byAdding: .day, value: offset, to: today)!
+            let weekend = calendar.isDateInWeekend(day)
+            var entries: [(String, String)] = []
+            if !weekend { for _ in 0..<(2 + next(4)) { entries.append((work, workTitles[next(workTitles.count)])) } }
+            for _ in 0..<next(weekend ? 3 : 2) { entries.append((mine, personalTitles[next(personalTitles.count)])) }
+            if weekend || next(5) == 0 { entries.append((family, familyTitles[next(familyTitles.count)])) }
+            for (index, entry) in entries.enumerated() {
+                let hour = min(20, 8 + index * 2 + next(2))
+                let start = calendar.date(bySettingHour: hour, minute: next(2) * 30, second: 0, of: day)!
+                let minutes = [30, 45, 60, 90][next(4)]
+                var event = GoogleEvent(id: "busy\(offset + 200)x\(index)", summary: entry.1,
+                                        start: GoogleEventDateTime(dateTime: iso.string(from: start), timeZone: zone),
+                                        end: GoogleEventDateTime(dateTime: iso.string(from: start.addingTimeInterval(Double(minutes) * 60)), timeZone: zone))
+                event.status = "confirmed"
+                event.etag = "\"busy\(offset)-\(index)\""
+                if entry.0 == work && next(3) == 0 { event.hangoutLink = "https://meet.google.com/busy-\(offset + 200)-\(index)" }
+                state.calendarVersion += 1
+                state.events.append(MockEvent(calendarID: entry.0, event: event, version: state.calendarVersion))
+            }
+            if next(11) == 0 {
+                let length = 1 + next(3)
+                var event = GoogleEvent(id: "busy\(offset + 200)allday", summary: allDayTitles[next(allDayTitles.count)],
+                                        start: GoogleEventDateTime(date: dayFormatter.string(from: day)),
+                                        end: GoogleEventDateTime(date: dayFormatter.string(from: calendar.date(byAdding: .day, value: length, to: day)!)))
+                event.status = "confirmed"
+                state.calendarVersion += 1
+                state.events.append(MockEvent(calendarID: [work, family][next(2)], event: event, version: state.calendarVersion))
+            }
+        }
+    }
+
     private static func seedCalendar(into state: inout MockState, now: Date) {
         var calendar = Calendar.current
         calendar.firstWeekday = 2
