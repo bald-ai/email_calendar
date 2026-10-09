@@ -290,11 +290,20 @@ final class OverlayController {
 
     private func fitContent(_ height: CGFloat?) {
         contentHeight = height
+        // Called from inside a SwiftUI update; resizing the window there can leave its layout
+        // stale, so apply it right after the update finishes.
+        DispatchQueue.main.async { [weak self] in self?.applyContentHeight() }
+    }
+
+    private func applyContentHeight() {
         guard isOpen, resizeInitialHeight == nil, let panel, let screen = selectedScreen else { return }
         let target = fittedHeight(on: screen)
         guard abs(target - panel.frame.height) > 4 else { return }
-        // Instant: animating the frame relays out the whole grid on every animation frame.
+        // Instant, top edge fixed: animating the frame relays out the whole grid on every frame.
         panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.maxY - target, width: screen.frame.width, height: target), display: true)
+        panel.contentView?.layoutSubtreeIfNeeded()
+        // Stay in front of other always-on-top panels (Prompt Palette uses the same level).
+        panel.orderFrontRegardless()
     }
 
     private func finishResize() {

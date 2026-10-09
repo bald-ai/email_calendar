@@ -15,9 +15,11 @@ struct OverlayWeekView: View {
     enum Mode: String, CaseIterable { case week = "Week", month = "Month" }
 
     @AppStorage("overlay.mode") private var mode: Mode = .week
-    @State private var weekPosition = ScrollPosition()
-    @State private var hourPosition = ScrollPosition()
+    @State private var weekPosition: ScrollPosition
+    @State private var hourPosition: ScrollPosition
     @State private var monthRequest: OverlayMonth.Request?
+    /// The week row the month view starts on when it's created.
+    @State private var monthStartRow: Date
     @State private var weekFirstVisible = Date.now
     @State private var monthFocus = Date.now
     /// The month the window is sized for. Set by opening, Today and the arrows, not by free
@@ -51,6 +53,22 @@ struct OverlayWeekView: View {
         days = (0..<(7 * 26)).map { calendar.date(byAdding: .day, value: $0, to: firstDay)! }
         let firstWeek = calendar.date(byAdding: .weekOfYear, value: -26, to: thisWeek)!
         weeks = (0..<78).map { calendar.date(byAdding: .weekOfYear, value: $0, to: firstWeek)! }
+        // Views start where they should be, instead of being scrolled after they appear.
+        let startDay = days.first { calendar.isDate($0, inSameDayAs: thisWeek) } ?? thisWeek
+        _weekPosition = State(initialValue: ScrollPosition(id: startDay, anchor: .leading))
+        _hourPosition = State(initialValue: ScrollPosition(y: OverlayTimeline.nowOffset()))
+        _weekFirstVisible = State(initialValue: thisWeek)
+        _monthStartRow = State(initialValue: Self.monthRow(for: .now, in: weeks))
+    }
+
+    /// The week row placed at the top so the target (today, or a month's 1st) is in the second row.
+    static func monthRow(for date: Date, in weeks: [Date]) -> Date {
+        let calendar = CalendarGeometry.calendar
+        let target = calendar.isDate(date, equalTo: .now, toGranularity: .month)
+            ? Date.now : (calendar.dateInterval(of: .month, for: date)?.start ?? date)
+        let week = calendar.dateInterval(of: .weekOfYear, for: target)!.start
+        let row = calendar.date(byAdding: .weekOfYear, value: -1, to: week)!
+        return weeks.first { calendar.isDate($0, inSameDayAs: row) } ?? weeks[0]
     }
 
     private var visibleEvents: [CalendarEvent] { index.all }
@@ -91,6 +109,9 @@ struct OverlayWeekView: View {
                 header
                 if let date = quickAddDate { quickAddBar(date) }
             }
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
+            .zIndex(1)
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { chromeHeight = $0 + 9 }
             Group {
                 switch mode {
@@ -100,11 +121,14 @@ struct OverlayWeekView: View {
                                     firstVisible: $weekFirstVisible, dayWidth: $timelineDayWidth,
                                     onEvent: { selectedEvent = $0 }, onEmptySlot: beginQuickAdd)
                 case .month:
-                    OverlayMonth(weeks: weeks, index: index, calendars: store.calendars, request: monthRequest,
+                    OverlayMonth(weeks: weeks, index: index, calendars: store.calendars, startRow: monthStartRow, request: monthRequest,
                                  focusMonth: $monthFocus, onEvent: { selectedEvent = $0 }, onDay: openWeek)
                 }
             }
-            .transition(.opacity)
+            // One view at a time, clipped to the space under the top bar: never both during a switch.
+            .id(mode)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
             Rectangle().fill(Theme.line).frame(height: 1)
             Capsule().fill(Color.secondary.opacity(0.3)).frame(width: 42, height: 3)
                 .frame(maxWidth: .infinity).frame(height: 8)
@@ -112,6 +136,7 @@ struct OverlayWeekView: View {
                 .gesture(DragGesture(minimumDistance: 1).onChanged { onResizeChanged($0.translation.height) }.onEnded { _ in onResizeEnded() })
                 .onHover { hovering in if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() } }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .foregroundStyle(Theme.text)
         .background(Theme.window.opacity(0.86)).background(.ultraThinMaterial)
         .environment(store)
@@ -120,7 +145,6 @@ struct OverlayWeekView: View {
         .defaultFocus($overlayFocused, true)
         .onAppear {
             overlayFocused = true
-            if mode == .month { scrollMonth(to: .now, animated: false) }
             let span = DateInterval(start: weeks.first!, end: CalendarGeometry.calendar.date(byAdding: .weekOfYear, value: 1, to: weeks.last!)!)
             Task { await store.refreshCalendar(range: span) }
         }
@@ -195,6 +219,7 @@ struct OverlayWeekView: View {
             }
         }
         .padding(2).background(.white.opacity(0.07), in: Capsule())
+        .animation(.snappy(duration: 0.2), value: mode)
     }
     @Namespace private var modeNamespace
 
@@ -261,12 +286,12 @@ struct OverlayWeekView: View {
     private func switchMode(_ new: Mode) {
         guard new != mode else { return }
         quickAddDate = nil
-        let focus = mode == .week ? weekFirstVisible : monthFocus
-        withAnimation(.easeOut(duration: 0.18)) { mode = new }
         // Keep your place: the week you were looking at stays in view in the other mode.
-        DispatchQueue.main.async {
-            if new == .month { scrollMonth(to: focus, animated: false) } else { scrollWeek(to: focus, animated: false) }
-        }
+        let focus = mode == .week ? CalendarGeometry.calendar.date(byAdding: .day, value: 3, to: weekFirstVisible)! : monthFocus
+        if new == .month { prepareMonth(at: focus) } else { prepareWeek(at: focus) }
+        // Swapped instantly; only the Week | Month pill slides (see modeSwitch).
+        mode = new
+        overlayFocused = true
     }
 
     private func goToToday() {
@@ -291,10 +316,9 @@ struct OverlayWeekView: View {
     private func scrollWeek(to date: Date, animated: Bool, centerHours: Bool = false) {
         let calendar = CalendarGeometry.calendar
         let weekStart = calendar.dateInterval(of: .weekOfYear, for: date)!.start
-        guard timelineDayWidth > 0, let index = days.firstIndex(where: { calendar.isDate($0, inSameDayAs: weekStart) }) else { return }
-        let x = CGFloat(index) * timelineDayWidth
+        guard let day = days.first(where: { calendar.isDate($0, inSameDayAs: weekStart) }) else { return }
         withAnimation(animated ? animation : nil) {
-            weekPosition.scrollTo(x: x)
+            weekPosition.scrollTo(id: day, anchor: .leading)
             if centerHours { hourPosition.scrollTo(y: OverlayTimeline.nowOffset()) }
         }
     }
@@ -305,17 +329,32 @@ struct OverlayWeekView: View {
         // This month centers on today; any other month starts at its 1st.
         let target = calendar.isDate(date, equalTo: .now, toGranularity: .month)
             ? Date.now : (calendar.dateInterval(of: .month, for: date)?.start ?? date)
-        let week = calendar.dateInterval(of: .weekOfYear, for: target)!.start
-        let row = calendar.date(byAdding: .weekOfYear, value: -1, to: week)!
-        guard let id = weeks.first(where: { calendar.isDate($0, inSameDayAs: row) }) else { return }
-        monthRequest = OverlayMonth.Request(week: id, animated: animated && !reduceMotion)
+        monthRequest = OverlayMonth.Request(week: Self.monthRow(for: target, in: weeks), animated: animated && !reduceMotion)
         monthFocus = target
         sizedMonth = target
     }
 
     private func openWeek(_ day: Date) {
-        withAnimation(.easeOut(duration: 0.18)) { mode = .week }
-        DispatchQueue.main.async { scrollWeek(to: day, animated: false) }
+        prepareWeek(at: day)
+        mode = .week
+        overlayFocused = true
+    }
+
+    private func prepareWeek(at date: Date) {
+        let calendar = CalendarGeometry.calendar
+        let weekStart = calendar.dateInterval(of: .weekOfYear, for: date)!.start
+        let day = days.first { calendar.isDate($0, inSameDayAs: weekStart) } ?? days[0]
+        weekFirstVisible = day
+        weekPosition = ScrollPosition(id: day, anchor: .leading)
+    }
+
+    private func prepareMonth(at date: Date) {
+        let calendar = CalendarGeometry.calendar
+        let target = calendar.isDate(date, equalTo: .now, toGranularity: .month) ? Date.now : date
+        monthStartRow = Self.monthRow(for: target, in: weeks)
+        monthRequest = nil
+        monthFocus = target
+        sizedMonth = target
     }
 
     // MARK: Quick add
@@ -381,7 +420,6 @@ private struct OverlayTimeline: View {
     static let headerHeight: CGFloat = 50
     private let gutter: CGFloat = 50
     @State private var offsetX: CGFloat = 0
-    @State private var positioned = false
 
     /// Scroll offset that puts the current time about two hours below the top.
     static func nowOffset() -> CGFloat {
@@ -410,6 +448,7 @@ private struct OverlayTimeline: View {
                                                      hourHeight: Self.hourHeight, onEvent: onEvent, onEmptySlot: onEmptySlot)
                                 }
                             }
+                            .scrollTargetLayout()
                         }
                         .scrollIndicators(.never)
                         .scrollPosition($dayPosition)
@@ -424,12 +463,16 @@ private struct OverlayTimeline: View {
                 .scrollIndicators(.never)
                 .scrollPosition($hourPosition)
             }
-            .onAppear { dayWidth = width; positionAtToday(width: width) }
+            .onAppear {
+                dayWidth = width
+                // Headers follow the scroll offset; start them where the grid starts.
+                let index = days.firstIndex { CalendarGeometry.calendar.isDate($0, inSameDayAs: firstVisible) } ?? 0
+                offsetX = CGFloat(index) * width
+            }
             .onChange(of: width) { _, new in
                 // Keep the same first day in view when the overlay is resized.
-                let index = days.firstIndex { CalendarGeometry.calendar.isDate($0, inSameDayAs: firstVisible) } ?? 0
                 dayWidth = new
-                dayPosition.scrollTo(x: CGFloat(index) * new)
+                dayPosition.scrollTo(id: firstVisible, anchor: .leading)
             }
         }
     }
@@ -444,20 +487,6 @@ private struct OverlayTimeline: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func positionAtToday(width: CGFloat) {
-        guard !positioned else { return }
-        positioned = true
-        let calendar = CalendarGeometry.calendar
-        let weekStart = calendar.dateInterval(of: .weekOfYear, for: .now)!.start
-        let index = days.firstIndex { calendar.isDate($0, inSameDayAs: weekStart) } ?? 0
-        firstVisible = days[index]
-        offsetX = CGFloat(index) * width
-        DispatchQueue.main.async {
-            dayPosition.scrollTo(x: CGFloat(index) * width)
-            hourPosition.scrollTo(y: Self.nowOffset())
-        }
     }
 
     private var hourLabels: some View {
@@ -606,7 +635,18 @@ private struct OverlayMonth: View {
     @Binding var focusMonth: Date
     var onEvent: (CalendarEvent) -> Void
     var onDay: (Date) -> Void
-    @State private var position = ScrollPosition(idType: Date.self)
+    @State private var position = ScrollPosition()
+    /// The week row at the top. Rows have a fixed height, so it maps exactly to a scroll offset.
+    @State private var topIndex: Int
+    @State private var rowHeight: CGFloat = 0
+    @State private var aligning = false
+
+    init(weeks: [Date], index: CalendarGeometry.DayIndex, calendars: [CalendarRecord], startRow: Date, request: Request?,
+         focusMonth: Binding<Date>, onEvent: @escaping (CalendarEvent) -> Void, onDay: @escaping (Date) -> Void) {
+        self.weeks = weeks; self.index = index; self.calendars = calendars; self.request = request
+        _focusMonth = focusMonth; self.onEvent = onEvent; self.onDay = onDay
+        _topIndex = State(initialValue: weeks.firstIndex(of: startRow) ?? 0)
+    }
 
     static let weekdayHeight: CGFloat = 24
     private var weekdayHeight: CGFloat { Self.weekdayHeight }
@@ -615,12 +655,28 @@ private struct OverlayMonth: View {
     static let lineHeight: CGFloat = 16
     static func rowHeight(fitting events: Int) -> CGFloat { 30 + CGFloat(max(2, events)) * lineHeight + 6 }
 
+    private struct Scroll: Equatable { var offset: CGFloat; var contentHeight: CGFloat }
+
+    /// Put the top week back at the top after the first layout or a row-height change (the window
+    /// stretching), instead of keeping a pixel offset that now points at a different week.
+    private func align(_ height: CGFloat) {
+        aligning = true
+        rowHeight = height
+        DispatchQueue.main.async {
+            position.scrollTo(y: CGFloat(topIndex) * height)
+            DispatchQueue.main.async { aligning = false }
+        }
+    }
+
     var body: some View {
         let colors = Dictionary(calendars.map { ($0.id, $0.colorHex) }, uniquingKeysWith: { first, _ in first })
         let focusKey = CalendarGeometry.calendar.component(.year, from: focusMonth) * 12 + CalendarGeometry.calendar.component(.month, from: focusMonth)
         GeometryReader { geometry in
             let rowHeight = max(54, ((geometry.size.height - weekdayHeight) / 5).rounded(.down))
             VStack(spacing: 0) {
+                Color.clear.frame(height: 0)
+                    .onAppear { align(rowHeight) }
+                    .onChange(of: rowHeight) { _, height in align(height) }
                 HStack(spacing: 0) {
                     ForEach(0..<7, id: \.self) { offset in
                         Text(CalendarGeometry.calendar.date(byAdding: .day, value: offset, to: weeks[0])!.formatted(.dateTime.weekday(.abbreviated)))
@@ -636,24 +692,27 @@ private struct OverlayMonth: View {
                             MonthWeekRow(week: week, days: MonthWeekRow.days(week: week, index: index, colors: colors),
                                          focusKey: focusKey, height: rowHeight, onEvent: onEvent, onDay: onDay)
                                 .equatable()
-                                .id(week)
                         }
                     }
-                    .scrollTargetLayout()
                 }
                 .scrollIndicators(.never)
                 .scrollPosition($position)
-                .onScrollGeometryChange(for: Int.self, of: { Int(($0.contentOffset.y / rowHeight).rounded()) }) { _, row in
+                .onScrollGeometryChange(for: Scroll.self, of: { Scroll(offset: $0.contentOffset.y, contentHeight: $0.contentSize.height) }) { _, new in
+                    // Ignore scrolls reported while rows are being re-laid out or re-aligned.
+                    guard !aligning, self.rowHeight > 0, abs(new.contentHeight - CGFloat(weeks.count) * self.rowHeight) < 1 else { return }
+                    let row = min(weeks.count - 1, max(0, Int((new.offset / self.rowHeight).rounded())))
+                    if row != topIndex { topIndex = row }
                     // The month of the second visible row's middle day names what you're looking at.
-                    let index = min(weeks.count - 1, max(0, row + 1))
-                    let middle = CalendarGeometry.calendar.date(byAdding: .day, value: 3, to: weeks[index])!
+                    let middle = CalendarGeometry.calendar.date(byAdding: .day, value: 3, to: weeks[min(weeks.count - 1, row + 1)])!
                     if !CalendarGeometry.calendar.isDate(middle, equalTo: focusMonth, toGranularity: .month) { focusMonth = middle }
                 }
             }
         }
-        .onChange(of: request, initial: true) { _, request in
-            guard let request else { return }
-            withAnimation(request.animated ? .smooth(duration: 0.35) : nil) { position.scrollTo(id: request.week, anchor: .top) }
+        .onChange(of: request) { _, request in
+            guard let request, let row = weeks.firstIndex(of: request.week) else { return }
+            topIndex = row
+            guard rowHeight > 0 else { return }
+            withAnimation(request.animated ? .smooth(duration: 0.35) : nil) { position.scrollTo(y: CGFloat(row) * rowHeight) }
         }
     }
 }
