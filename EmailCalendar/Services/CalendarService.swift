@@ -6,14 +6,22 @@ struct CalendarWriteCommittedError: LocalizedError, Sendable {
     var errorDescription: String? { message }
 }
 
+/// The move committed, but the edited fields did not. Keep the editor and retry on the destination.
+struct CalendarMoveIncompleteError: LocalizedError, Sendable {
+    var pendingEvent: CalendarEvent
+    var message: String
+    var errorDescription: String? { message }
+}
+
 /// The overlay and main calendar read this cache without waiting for Google.
 /// Raw date-only values stay in SQLite so all-day dates survive a system time-zone change.
 actor CalendarService {
     enum CalendarError: LocalizedError, Sendable {
-        case invalidDates, missingTitle, missingEvent, readOnlyCalendar, invalidGoogleDate(String)
+        case invalidDates, missingTitle, missingEvent, readOnlyCalendar, invalidRecurrence, invalidGoogleDate(String)
         var errorDescription: String? {
             switch self {
             case .invalidDates: "An event must end after it starts."
+            case .invalidRecurrence: "Check the repeat rule and its end date."
             case .missingTitle: "Give the event a title."
             case .missingEvent: "This event is no longer in the calendar cache. Refresh and try again."
             case .readOnlyCalendar: "You cannot edit events in this calendar."
@@ -40,6 +48,9 @@ actor CalendarService {
     private var operationTails: [String: Task<Void, Never>] = [:]
     private var operationCancellers: [UUID: @Sendable () -> Void] = [:]
     private var isDraining = false
+    private struct ParsedKey: Hashable { var accountID: String; var calendarID: String }
+    private struct ParsedEvents { var revision: UInt64; var zone: String; var events: [CalendarEvent] }
+    private var parsedEvents: [ParsedKey: ParsedEvents] = [:]
 
     init(api: GoogleAPI, store: LocalStore) {
         self.api = api
@@ -63,10 +74,18 @@ actor CalendarService {
         let calendars = try await cachedCalendars(accountID: accountID)
         var result: [CalendarEvent] = []
         for calendar in calendars where !visibleOnly || calendar.isVisible {
-            let raw = try await store.all(GoogleEvent.self, collection: eventsCollection(calendar.id), accountID: accountID)
-            result += try raw.filter { $0.status != "cancelled" }.map {
-                try Self.event(from: $0, calendarID: calendar.id, accountID: accountID)
-            }
+            let key = ParsedKey(accountID: accountID, calendarID: calendar.id)
+            let zone = TimeZone.current.identifier
+            let cached = parsedEvents[key]
+            let snapshot = try await store.snapshot(GoogleEvent.self, collection: eventsCollection(calendar.id), accountID: accountID,
+                                                    ifChangedSince: cached?.zone == zone ? cached?.revision : nil)
+            if let snapshot {
+                let events = try snapshot.values.filter { $0.status != "cancelled" }.map {
+                    try Self.event(from: $0, calendarID: calendar.id, accountID: accountID)
+                }
+                parsedEvents[key] = ParsedEvents(revision: snapshot.revision, zone: zone, events: events)
+                result += events
+            } else { result += cached?.events ?? [] }
         }
         return result.sorted { $0.start == $1.start ? $0.id < $1.id : $0.start < $1.start }
     }
@@ -119,7 +138,7 @@ actor CalendarService {
     func ensureEvents(accountID: String, interval: DateInterval) async throws {
         try await serialized(accountID: accountID) {
             let calendars = try await self.cachedCalendars(accountID: accountID)
-            for calendar in calendars where calendar.isVisible {
+            for calendar in calendars where calendar.isVisible && calendar.accessRole != "freeBusyReader" {
                 let coverage = try await self.coverage(calendarID: calendar.id, accountID: accountID)
                 if coverage.contains(where: { $0.start <= interval.start && $0.end >= interval.end }) { continue }
                 try await self.refreshRange(calendarID: calendar.id, accountID: accountID, interval: interval)
@@ -129,11 +148,18 @@ actor CalendarService {
     }
 
     @discardableResult
-    func create(_ event: CalendarEvent) async throws -> CalendarEvent {
+    func create(_ event: CalendarEvent, requestID: UUID? = nil) async throws -> CalendarEvent {
         try await serialized(accountID: event.accountID) {
             try await self.requireWritable(calendarID: event.calendarID, accountID: event.accountID)
             try Self.validate(event)
-            let raw = try await self.api.insertEvent(calendarID: event.calendarID, event: Self.googleEvent(from: event))
+            var payload = try Self.googleEvent(from: event)
+            if let requestID { payload.id = "ec" + requestID.uuidString.lowercased().replacingOccurrences(of: "-", with: "") }
+            let raw: GoogleEvent
+            do { raw = try await self.api.insertEvent(calendarID: event.calendarID, event: payload, includeID: requestID != nil) }
+            catch let error as GoogleAPIError where error.statusCode == 409 && requestID != nil {
+                // A previous attempt may have committed before its response was lost.
+                raw = try await self.api.event(calendarID: event.calendarID, id: payload.id)
+            }
             do {
                 if raw.recurrence?.isEmpty == false {
                     try await self.refreshKnownRanges(calendarID: event.calendarID, accountID: event.accountID)
@@ -149,7 +175,7 @@ actor CalendarService {
 
     @discardableResult
     func update(_ event: CalendarEvent, originalCalendarID: String? = nil,
-                scope: EventEditScope = .thisEvent) async throws -> CalendarEvent {
+                scope: EventEditScope = .thisEvent, originalEvent: CalendarEvent? = nil) async throws -> CalendarEvent {
         try await serialized(accountID: event.accountID) {
             try Self.validate(event)
             let sourceCalendarID = originalCalendarID ?? event.calendarID
@@ -162,8 +188,14 @@ actor CalendarService {
             var mutationETag = event.etag ?? oldRaw?.etag
             if scope == .allEvents, let seriesID = event.recurringEventID {
                 guard let oldRaw else { throw CalendarError.missingEvent }
+                if let etag = event.etag {
+                    let current = try await self.api.event(calendarID: sourceCalendarID, id: event.id)
+                    guard current.etag == etag else {
+                        throw GoogleAPIError.http(status: 412, message: "This recurring event changed while you were editing it. Reopen it before saving all events.")
+                    }
+                }
                 let master = try await self.api.event(calendarID: sourceCalendarID, id: seriesID)
-                let old = try Self.event(from: oldRaw, calendarID: sourceCalendarID, accountID: event.accountID)
+                let old = try originalEvent ?? Self.event(from: oldRaw, calendarID: sourceCalendarID, accountID: event.accountID)
                 let masterEvent = try Self.event(from: master, calendarID: sourceCalendarID, accountID: event.accountID)
                 var calendar = Calendar(identifier: .gregorian)
                 calendar.timeZone = master.start?.timeZone.flatMap(TimeZone.init(identifier:)) ?? .current
@@ -181,35 +213,41 @@ actor CalendarService {
                 edited.recurrence = []
             }
             let isMoving = sourceCalendarID != event.calendarID
+            // Validate recurrence and construct the payload before any irreversible move.
+            var payload = try Self.googleEvent(from: edited, timeZone: original?.start?.timeZone)
+            if edited.recurrence.isEmpty, edited.recurringEventID == nil, original?.recurrence?.isEmpty == false {
+                // PATCH omission preserves the existing rule; an empty array explicitly removes it.
+                payload.recurrence = []
+            }
+            var movedEvent: GoogleEvent?
             if isMoving {
                 let moved = try await self.api.moveEvent(calendarID: sourceCalendarID, eventID: edited.id,
                                                         destinationCalendarID: event.calendarID)
                 edited.id = moved.id
-                original = moved
+                edited.etag = moved.etag
                 mutationETag = moved.etag
-                do {
-                    try await self.removeCached(id: event.id, seriesID: scope == .allEvents ? event.recurringEventID : nil,
-                                                calendarID: sourceCalendarID, accountID: event.accountID)
-                    if moved.recurrence?.isEmpty == false {
-                        try await self.refreshKnownRanges(calendarID: event.calendarID, accountID: event.accountID)
-                    } else {
-                        try await self.save(moved, calendarID: event.calendarID, accountID: event.accountID)
-                    }
-                } catch {
-                    throw Self.moveWarning(error: error)
-                }
+                movedEvent = moved
             }
-            var payload = Self.googleEvent(from: edited, timeZone: original?.start?.timeZone)
             payload.id = edited.id
             payload.etag = mutationETag
             let raw: GoogleEvent
             do {
                 raw = try await self.api.updateEvent(calendarID: event.calendarID, event: payload)
             } catch {
-                if isMoving { throw Self.moveWarning(error: error) }
+                if let movedEvent {
+                    try? await self.removeCached(id: event.id, seriesID: scope == .allEvents ? event.recurringEventID : nil,
+                                                 calendarID: sourceCalendarID, accountID: event.accountID)
+                    try? await self.save(movedEvent, calendarID: event.calendarID, accountID: event.accountID)
+                    throw CalendarMoveIncompleteError(pendingEvent: edited,
+                        message: "The event moved to the selected calendar, but its remaining changes could not be saved. Your edits are still here; try Save again. \(error.localizedDescription)")
+                }
                 throw error
             }
             do {
+                if isMoving {
+                    try await self.removeCached(id: event.id, seriesID: scope == .allEvents ? event.recurringEventID : nil,
+                                                calendarID: sourceCalendarID, accountID: event.accountID)
+                }
                 if raw.recurrence?.isEmpty == false {
                     // Google returns the master; fetch expanded instances before publishing the change.
                     try await self.refreshKnownRanges(calendarID: event.calendarID, accountID: event.accountID)
@@ -342,20 +380,26 @@ actor CalendarService {
     }
 
     private func apply(_ changes: [GoogleEvent], calendarID: String, accountID: String, replacing: Bool = false) async throws {
-        let existing: [GoogleEvent] = replacing ? [] : try await store.all(GoogleEvent.self, collection: eventsCollection(calendarID), accountID: accountID)
-        var rows = Dictionary(existing.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        guard replacing || !changes.isEmpty else { return }
+        var records: [LocalStore.Record<GoogleEvent>] = []
+        var removals = Set<String>()
+        let resetSeries = Set(changes.filter { $0.status == "cancelled" && $0.recurringEventId == nil }.map(\.id))
         for raw in changes {
             if raw.status == "cancelled" {
-                rows.removeValue(forKey: raw.id)
-                rows = rows.filter { $0.value.recurringEventId != raw.id }
+                removals.insert(raw.id)
+                if raw.recurringEventId == nil {
+                    let existing = try await store.all(GoogleEvent.self, collection: eventsCollection(calendarID), accountID: accountID)
+                    removals.formUnion(existing.filter { $0.recurringEventId == raw.id }.map(\.id))
+                }
             } else {
-                // Validate before replacing the last known good cache.
-                _ = try Self.event(from: raw, calendarID: calendarID, accountID: accountID)
-                rows[raw.id] = raw
+                let event = try Self.event(from: raw, calendarID: calendarID, accountID: accountID)
+                if !replacing, !resetSeries.contains(raw.recurringEventId ?? ""), let old = try await store.load(GoogleEvent.self, id: raw.id, collection: eventsCollection(calendarID), accountID: accountID), old == raw { continue }
+                records.append(.init(id: raw.id, value: raw, sortDate: event.start))
             }
         }
-        try await store.save(rows.values.map { LocalStore.Record(id: $0.id, value: $0, sortDate: Self.date($0.start)) },
-                             collection: eventsCollection(calendarID), accountID: accountID, replacing: true)
+        guard replacing || !records.isEmpty || !removals.isEmpty else { return }
+        try await store.save(records, collection: eventsCollection(calendarID), accountID: accountID,
+                             replacing: replacing, removing: removals)
     }
 
     private func save(_ event: GoogleEvent, calendarID: String, accountID: String) async throws {
@@ -437,10 +481,6 @@ actor CalendarService {
         CalendarWriteCommittedError(message: "The event was \(action) in Google Calendar, but the local calendar could not refresh. \(error.localizedDescription) Refresh again when you are online.")
     }
 
-    private static func moveWarning(error: any Error) -> CalendarWriteCommittedError {
-        CalendarWriteCommittedError(message: "The event moved to the selected calendar, but saving the remaining changes failed. \(error.localizedDescription) Refresh the calendar before retrying those changes.")
-    }
-
     static func event(from raw: GoogleEvent, calendarID: String, accountID: String) throws -> CalendarEvent {
         guard let start = date(raw.start), let end = date(raw.end), end > start else {
             throw CalendarError.invalidGoogleDate(raw.id)
@@ -455,24 +495,26 @@ actor CalendarService {
             start: start, end: end, isAllDay: raw.start?.date != nil, location: raw.location ?? "", notes: raw.description ?? "",
             recurrence: raw.recurrence ?? [], recurringEventID: raw.recurringEventId, originalStart: date(raw.originalStartTime),
             videoURL: videoURL(raw), htmlLink: raw.htmlLink.flatMap(URL.init(string:)), attendees: attendees,
-            status: raw.status ?? "confirmed", etag: raw.etag)
+            status: raw.status ?? "confirmed", etag: raw.etag, timeZone: raw.start?.timeZone)
     }
 
-    private static func googleEvent(from event: CalendarEvent, timeZone: String? = nil) -> GoogleEvent {
-        let zone = timeZone ?? TimeZone.current.identifier
+    static func googleEvent(from event: CalendarEvent, timeZone: String? = nil) throws -> GoogleEvent {
+        let zone = event.timeZone ?? timeZone ?? TimeZone.current.identifier
         func value(_ date: Date) -> GoogleEventDateTime {
             if event.isAllDay {
-                let formatter = DateFormatter()
-                formatter.locale = Locale(identifier: "en_US_POSIX")
-                formatter.calendar = Calendar(identifier: .gregorian)
-                formatter.timeZone = .current
-                formatter.dateFormat = "yyyy-MM-dd"
-                return GoogleEventDateTime(date: formatter.string(from: date))
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = .current
+                return GoogleEventDateTime(date: CalendarDates.dayString(date, calendar: calendar))
             }
             return GoogleEventDateTime(dateTime: ISO8601DateFormatter().string(from: date), timeZone: zone)
         }
+        let rules = try event.recurrence.map { rule in
+            guard let result = RepeatRule.forEvent(rule, isAllDay: event.isAllDay,
+                                                   timeZone: TimeZone(identifier: zone) ?? .current) else { throw CalendarError.invalidRecurrence }
+            return result
+        }
         return GoogleEvent(id: event.id, summary: event.title, start: value(event.start), end: value(event.end),
-            description: event.notes, location: event.location, recurrence: event.recurrence.isEmpty ? nil : event.recurrence,
+            description: event.notes, location: event.location, recurrence: rules.isEmpty ? nil : rules,
             attendees: event.attendees.isEmpty ? nil : event.attendees.map { attendee in
                 var value = GoogleAttendee(email: attendee.email, responseStatus: attendee.response.rawValue)
                 value.displayName = attendee.name
@@ -483,21 +525,13 @@ actor CalendarService {
     static func date(_ value: GoogleEventDateTime?) -> Date? {
         guard let value else { return nil }
         if let date = value.date {
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.calendar = Calendar(identifier: .gregorian)
-            formatter.timeZone = .current
-            formatter.dateFormat = "yyyy-MM-dd"
-            formatter.isLenient = false
-            guard let result = formatter.date(from: date), formatter.string(from: result) == date else { return nil }
-            return result
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = .current
+            return CalendarDates.day(date, calendar: calendar)
         }
         guard let text = value.dateTime else { return nil }
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = iso.date(from: text) { return date }
-        iso.formatOptions = [.withInternetDateTime]
-        if let date = iso.date(from: text) { return date }
+        if let date = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text) { return date }
+        if let date = try? Date.ISO8601FormatStyle().parse(text) { return date }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -514,9 +548,11 @@ actor CalendarService {
         let conference = raw.conferenceData?.entryPoints?.first(where: { $0.entryPointType == "video" })?.uri
         if let link = raw.hangoutLink ?? conference, let url = URL(string: link), ["http", "https"].contains(url.scheme ?? "") { return url }
         let text = [raw.location, raw.description].compactMap { $0 }.joined(separator: " ")
-        guard let pattern = try? NSRegularExpression(pattern: "https?://(?:[a-zA-Z0-9-]+\\.)?(?:zoom\\.us|meet\\.google\\.com)/[^\\s<>\"']+", options: .caseInsensitive),
+        guard !text.isEmpty, let pattern = videoPattern,
               let match = pattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
               let range = Range(match.range, in: text) else { return nil }
         return URL(string: String(text[range]))
     }
+
+    private static let videoPattern = try? NSRegularExpression(pattern: "https?://(?:[a-zA-Z0-9-]+\\.)?(?:zoom\\.us|meet\\.google\\.com)/[^\\s<>\"']+", options: .caseInsensitive)
 }

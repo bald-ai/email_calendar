@@ -3,7 +3,7 @@ import SwiftUI
 
 struct CalendarWeekGrid: View {
     let days: [Date]
-    let events: [CalendarEvent]
+    let index: EventDayIndex
     let calendars: [CalendarRecord]
     var compact = false
     var scrollToNow = UUID()
@@ -35,7 +35,7 @@ struct CalendarWeekGrid: View {
                             }
                             .font(.system(size: compact ? 10 : 12))
                             .foregroundStyle(Calendar.current.isDateInToday(day) ? Color.accentColor : Color.primary)
-                            ForEach(events.filter { $0.isAllDay && CalendarGeometry.overlaps($0, day: day) }.prefix(compact ? 1 : 3), id: \.cacheID) { event in
+                            ForEach(index.events(on: day).filter(\.isAllDay).prefix(compact ? 1 : 3), id: \.cacheID) { event in
                                 Button { onEvent(event) } label: {
                                     Text(event.title.isEmpty ? "Untitled" : event.title)
                                         .font(.system(size: 10)).lineLimit(1)
@@ -91,7 +91,7 @@ struct CalendarWeekGrid: View {
     }
 
     private func dayColumn(_ day: Date, width: CGFloat) -> some View {
-        let placements = CalendarGeometry.placements(events, day: day)
+        let placements = CalendarGeometry.placements(index.events(on: day), day: day)
         return ZStack(alignment: .topLeading) {
             Rectangle()
                 .fill(Calendar.current.isDateInToday(day) ? Color.accentColor.opacity(0.05) : Color.clear)

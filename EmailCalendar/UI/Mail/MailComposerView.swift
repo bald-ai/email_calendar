@@ -3,10 +3,19 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+@MainActor
 struct MailComposition: Identifiable {
     let id = UUID()
     var title: String
-    var message: OutgoingMessage
+    let session: DraftSession
+    var message: OutgoingMessage {
+        get { session.message }
+        set { session.message = newValue }
+    }
+    init(title: String, message: OutgoingMessage) {
+        self.title = title
+        session = DraftSession(message: message)
+    }
 
     static var newMessage: MailComposition { MailComposition(title: "New message", message: OutgoingMessage()) }
 
@@ -68,37 +77,28 @@ struct MailComposerView: View {
     let composition: MailComposition
     /// Called instead of dismissing a sheet: the composer is a page in the main window.
     var onClose: () -> Void = {}
-    @State private var message: OutgoingMessage
-    @State private var to: String
-    @State private var cc: String
-    @State private var bcc: String
+    private var draft: DraftSession { composition.session }
+    private var message: OutgoingMessage { draft.message }
+    private var to: String { draft.to }
+    private var cc: String { draft.cc }
+    private var bcc: String { draft.bcc }
+    private var isSaving: Bool { draft.isSaving }
+    private var isSending: Bool { draft.isSending }
+    private var savedAt: Date? { draft.savedAt }
     @State private var showsMoreRecipients: Bool
     @State private var showsImporter = false
-    @State private var isSaving = false
-    @State private var isSending = false
     @State private var isClosing = false
-    @State private var lastSaved: OutgoingMessage?
-    @State private var saveTask: Task<Void, Never>?
     @State private var errorText: String?
-    @State private var savedAt: Date?
     @FocusState private var focus: Field?
     private enum Field { case to, cc, bcc, body }
 
     init(composition: MailComposition, onClose: @escaping () -> Void = {}) {
         self.composition = composition
         self.onClose = onClose
-        _message = State(initialValue: composition.message)
-        _to = State(initialValue: composition.message.to.joined(separator: ", "))
-        _cc = State(initialValue: composition.message.cc.joined(separator: ", "))
-        _bcc = State(initialValue: composition.message.bcc.joined(separator: ", "))
         _showsMoreRecipients = State(initialValue: !composition.message.cc.isEmpty || !composition.message.bcc.isEmpty)
     }
 
-    private var outgoing: OutgoingMessage {
-        var result = message
-        result.to = addresses(to); result.cc = addresses(cc); result.bcc = addresses(bcc)
-        return result
-    }
+    private var outgoing: OutgoingMessage { draft.outgoing }
 
     private var canSend: Bool {
         let recipients = outgoing.to + outgoing.cc + outgoing.bcc
@@ -109,6 +109,7 @@ struct MailComposerView: View {
     }
 
     var body: some View {
+        @Bindable var draft = draft
         ZStack(alignment: .bottom) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -118,22 +119,22 @@ struct MailComposerView: View {
                         if isSaving { ProgressView().controlSize(.small); Text("Saving…").font(.caption).foregroundStyle(Theme.secondary) }
                         else if let savedAt { Text("Draft saved \(savedAt, style: .time)").font(.caption).foregroundStyle(Theme.secondary) }
                     }.padding(.bottom, 18)
-                    TextField("", text: $message.subject, prompt: Text("Subject").foregroundStyle(Theme.secondary.opacity(0.6)), axis: .vertical)
+                    TextField("", text: $draft.message.subject, prompt: Text("Subject").foregroundStyle(Theme.secondary.opacity(0.6)), axis: .vertical)
                         .textFieldStyle(.plain).font(.system(size: 30, weight: .bold)).padding(.bottom, 16)
                     VStack(spacing: 10) {
                         HStack(alignment: .firstTextBaseline) {
-                            recipientRow("To", value: $to, field: .to)
+                            recipientRow("To", value: $draft.to, field: .to)
                             Button(showsMoreRecipients ? "Hide Cc/Bcc" : "Cc/Bcc") { showsMoreRecipients.toggle() }
                                 .buttonStyle(QuietButtonStyle()).font(.system(size: 13)).foregroundStyle(Theme.secondary)
                         }
                         if showsMoreRecipients {
-                            recipientRow("Cc", value: $cc, field: .cc)
-                            recipientRow("Bcc", value: $bcc, field: .bcc)
+                            recipientRow("Cc", value: $draft.cc, field: .cc)
+                            recipientRow("Bcc", value: $draft.bcc, field: .bcc)
                         }
                     }
                     .padding(.horizontal, 14).padding(.vertical, 12)
                     .background(Theme.raised, in: RoundedRectangle(cornerRadius: 12))
-                    TextEditor(text: $message.body)
+                    TextEditor(text: $draft.message.body)
                         .font(.system(size: 15)).lineSpacing(3).scrollContentBackground(.hidden).focused($focus, equals: .body)
                         .scrollDisabled(true)
                         .frame(minHeight: 320).padding(.top, 18)
@@ -148,13 +149,13 @@ struct MailComposerView: View {
                                             .font(.caption2).foregroundStyle(Theme.secondary)
                                     }
                                     Spacer(minLength: 4)
-                                    Button { message.attachments.removeAll { $0.id == attachment.id } } label: { Image(systemName: "xmark.circle.fill") }
+                                    Button { draft.message.attachments.removeAll { $0.id == attachment.id } } label: { Image(systemName: "xmark.circle.fill") }
                                         .buttonStyle(QuietButtonStyle()).foregroundStyle(Theme.secondary).help("Remove attachment")
                                 }.font(.system(size: 13)).padding(10).background(Theme.raised, in: RoundedRectangle(cornerRadius: 10))
                             }
                         }.padding(.top, 10)
                     }
-                    if let errorText {
+                    if let errorText = errorText ?? draft.errorText {
                         Text(errorText).font(.callout).foregroundStyle(Theme.no).padding(.top, 10)
                     }
                     Spacer(minLength: 120)
@@ -194,9 +195,17 @@ struct MailComposerView: View {
         }
         .disabled(isSending || isClosing)
         .interactiveDismissDisabled()
-        .onAppear { focus = to.isEmpty ? .to : .body }
-        .onChange(of: outgoing) { _, value in if value != lastSaved { scheduleSave() } }
-        .onDisappear { saveTask?.cancel() }
+        .onAppear {
+            focus = to.isEmpty ? .to : .body
+            let accountID = store.account?.id
+            draft.configure(save: { outgoing in
+                guard store.account?.id == accountID else { throw CancellationError() }
+                return try await store.saveDraft(outgoing)
+            }, send: { outgoing in
+                guard store.account?.id == accountID else { throw CancellationError() }
+                try await store.send(outgoing)
+            })
+        }
         .fileImporter(isPresented: $showsImporter, allowedContentTypes: [.data], allowsMultipleSelection: true) { result in
             do {
                 let urls = try result.get()
@@ -213,7 +222,7 @@ struct MailComposerView: View {
                     additions.append(OutgoingAttachment(name: url.lastPathComponent,
                         mimeType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream", data: data))
                 }
-                message.attachments += additions
+                draft.message.attachments += additions
             } catch { errorText = error.localizedDescription }
         }
     }
@@ -230,46 +239,26 @@ struct MailComposerView: View {
     }
 
     private func addresses(_ field: String) -> [String] {
-        field.components(separatedBy: CharacterSet(charactersIn: ",;"))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-    }
-
-    private func scheduleSave() {
-        saveTask?.cancel()
-        saveTask = Task { @MainActor in
-            do { try await Task.sleep(for: .seconds(2)) } catch { return }
-            guard !isSending, !isSaving else { return }
-            saveTask = nil
-            await save(close: false)
-        }
+        DraftSession.addresses(field)
     }
 
     private func save(close: Bool) async {
-        guard !isSaving, !isSending else { return }
-        saveTask?.cancel()
-        let snapshot = outgoing
-        if snapshot.to.isEmpty && snapshot.cc.isEmpty && snapshot.bcc.isEmpty && snapshot.subject.isEmpty && snapshot.body.isEmpty && snapshot.attachments.isEmpty {
-            if close { onClose() }; return
-        }
-        isSaving = true; isClosing = close; errorText = nil
+        guard !isSending else { return }
+        isClosing = close; errorText = nil
         do {
-            let saved = try await store.saveDraft(snapshot)
-            message.draftID = saved.draftID
-            var savedSnapshot = snapshot; savedSnapshot.draftID = saved.draftID
-            lastSaved = savedSnapshot; savedAt = .now; isSaving = false
+            try await draft.flush()
             if close { onClose() }
-            else if outgoing != savedSnapshot { scheduleSave() }
         } catch {
-            isSaving = false; isClosing = false; errorText = "Draft could not be saved: \(error.localizedDescription)"
+            isClosing = false; errorText = "Draft could not be saved: \(error.localizedDescription)"
             if close { store.reportError(error) }
         }
     }
 
     private func send() async {
         guard canSend, !isSaving, !isSending else { return }
-        saveTask?.cancel(); isSending = true; errorText = nil
-        do { try await store.send(outgoing); onClose() }
-        catch { isSending = false; errorText = error.localizedDescription; store.reportError(error) }
+        errorText = nil
+        do { try await draft.send(); onClose() }
+        catch { errorText = error.localizedDescription; store.reportError(error) }
     }
 }
 #endif

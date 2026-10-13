@@ -9,6 +9,11 @@ actor LocalStore {
         var sortDate: Date? = nil
     }
 
+    struct Snapshot<Value: Sendable>: Sendable {
+        var revision: UInt64
+        var values: [Value]
+    }
+
     enum StoreError: LocalizedError {
         case database(String)
         var errorDescription: String? {
@@ -29,6 +34,16 @@ actor LocalStore {
     private let connection: Connection
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private struct CollectionKey: Hashable { var accountID: String; var collection: String }
+    private var revisions: [CollectionKey: UInt64] = [:]
+
+    func revision(collection: String, accountID: String) -> UInt64 {
+        revisions[CollectionKey(accountID: accountID, collection: collection), default: 0]
+    }
+
+    private func changed(collection: String, accountID: String) {
+        revisions[CollectionKey(accountID: accountID, collection: collection), default: 0] &+= 1
+    }
 
     init(url: URL? = nil) throws {
         let databaseURL: URL
@@ -78,20 +93,26 @@ actor LocalStore {
         try execute("INSERT INTO records(account_id, collection, id, payload, sort_date) VALUES(?,?,?,?,?) ON CONFLICT(account_id, collection, id) DO UPDATE SET payload=excluded.payload, sort_date=excluded.sort_date", [
             .text(accountID), .text(collection), .text(id), .data(try encoder.encode(value)), sortDate.map { .number($0.timeIntervalSince1970) } ?? .null
         ])
+        changed(collection: collection, accountID: accountID)
     }
 
-    func save<T: Codable & Sendable>(_ records: [Record<T>], collection: String, accountID: String, replacing: Bool = false) throws {
+    @discardableResult
+    func save<T: Codable & Sendable>(_ records: [Record<T>], collection: String, accountID: String, replacing: Bool = false, removing ids: Set<String> = []) throws -> UInt64 {
+        let oldRevision = revision(collection: collection, accountID: accountID)
         try execute("BEGIN IMMEDIATE")
         do {
             if replacing { try removeAll(collection: collection, accountID: accountID) }
+            for id in ids { try remove(id: id, collection: collection, accountID: accountID) }
             for record in records {
                 try save(record.value, id: record.id, collection: collection, accountID: accountID, sortDate: record.sortDate)
             }
             try execute("COMMIT")
         } catch {
             try? execute("ROLLBACK")
+            revisions[CollectionKey(accountID: accountID, collection: collection)] = oldRevision
             throw error
         }
+        return revision(collection: collection, accountID: accountID)
     }
 
     func load<T: Codable & Sendable>(_ type: T.Type, id: String, collection: String, accountID: String) throws -> T? {
@@ -102,12 +123,22 @@ actor LocalStore {
         try query("SELECT payload FROM records WHERE account_id=? AND collection=? ORDER BY sort_date DESC, id", [.text(accountID), .text(collection)]).map { try decoder.decode(type, from: $0) }
     }
 
+    /// Read the revision and contents in one actor turn, or skip decoding an unchanged collection.
+    func snapshot<T: Codable & Sendable>(_ type: T.Type, collection: String, accountID: String,
+                                        ifChangedSince previous: UInt64? = nil) throws -> Snapshot<T>? {
+        let revision = revision(collection: collection, accountID: accountID)
+        guard previous != revision else { return nil }
+        return Snapshot(revision: revision, values: try all(type, collection: collection, accountID: accountID))
+    }
+
     func remove(id: String, collection: String, accountID: String) throws {
         try execute("DELETE FROM records WHERE account_id=? AND collection=? AND id=?", [.text(accountID), .text(collection), .text(id)])
+        changed(collection: collection, accountID: accountID)
     }
 
     func removeAll(collection: String, accountID: String) throws {
         try execute("DELETE FROM records WHERE account_id=? AND collection=?", [.text(accountID), .text(collection)])
+        changed(collection: collection, accountID: accountID)
     }
 
     func metadata<T: Codable & Sendable>(_ type: T.Type, key: String, accountID: String) throws -> T? {

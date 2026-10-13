@@ -36,6 +36,8 @@ For normal use, build a signed app, move it to `/Applications`, and launch it th
 - Durable Bubble Up times processed on launch and refresh; Gmail labels expose mail states on other devices. Due mail returns at the top when it surfaces, then sorts alongside newer mail.
 - Calendar visibility, Day/Week/Month views, expanded recurring events, event creation/editing/deletion, this-event/all-events scope, invitation responses and detected video links.
 - A nonactivating, full-width `NSPanel` over Spaces/full-screen apps, selected by mouse display, with tap/hold hotkey, Escape/outside-click/Space dismissal, Reduce Motion, resizing, now-line, live next-event anchor, week navigation and quick event creation.
+- **Quick alarms** in the overlay (`A`): one-click 5m–1h presets, or type `10m`, `1h30`, `14:30`, `7pm`, with an optional label. Clicking an empty slot also offers **Alarm** at that time. A due alarm takes over every screen with a flashing red window and a looping beep until you **Snooze** (5 minutes; `S` or Space) or **Stop** (Return or Escape). Alarms survive relaunches; a missed one rings as soon as the app runs again. Pending alarms show in the overlay header and the menu bar, where they can be cancelled.
+- **AI add** in the overlay (`I`, or `⌘V` with a screenshot or text on the clipboard): describe an event, paste or drop a screenshot, or upload an image, and Claude Haiku 5.5 (high effort) proposes events, with GPT-6.1 Sol (normal speed, medium reasoning) as the automatic backup if a call fails. `EventAssistant.preferred` swaps the order. Each one shows the weekday, date, time, length and how far away it is, with editable date pickers and warnings for anything doubtful. Time-zone conversion and weekday checks are done in code, not by the model. The AI can also set what the editor offers: a real repeat rule ("every Tuesday for 8 weeks", "weekdays"), the calendar you name, and an alarm when you ask to be reminded; each card shows these as menus you can change. Events already in your calendar at that time are flagged: red for a likely duplicate, orange for an overlap. **Add** saves it to your primary calendar; **Add + alarm** also rings 10 minutes before (09:00 for all-day events). Keys come from Preferences (Keychain), `ANTHROPIC_API_KEY` / `ANTHROPIC_WORKSPACE_ID` / `OPENAI_API_KEY` in `Config/Secrets.xcconfig`, or the environment.
 - Sandboxed, ephemeral HTML rendering with JavaScript, forms, frames and remote resources blocked; remote images can be allowed per sender.
 
 The app polls while open and refreshes on focus and wake. Cached mail and events remain available offline; network writes report a failure and keep editable compose/event content open. There is no offline send queue. Gmail mail deletion only moves mail to Trash; the integration exposes no permanent message deletion endpoint.
@@ -46,7 +48,7 @@ The app polls while open and refreshes on focus and wake. Cached mail and events
 | --- | --- |
 | `h` | Open the go-to menu; then `1`–`6` for Imbox, Calendar, Screener, Set Aside, Bubble Up, Drafts |
 | `j` / `k`, Return | Move through emails, open one (in a thread, `j`/`k` go to the next or previous) |
-| `p` | Power Through New: open new mail one after another |
+| `p` | Power Through New: all new mail as one scrolling stack of cards; `j`/`k` jump between cards, `s` marks the one in view seen, Return opens its whole thread |
 | `r`, `f`, `c` | Reply, forward, write a new email (reply all is under More) |
 | `a` (or `s`) | Set Aside, or take it back |
 | `z` (or `b`) | Bubble Up |
@@ -57,6 +59,7 @@ The app polls while open and refreshes on focus and wake. Cached mail and events
 | `⌘F3` | Toggle the calendar overlay; hold to peek (on most Macs, press fn too unless F-keys are standard function keys) |
 | `W` / `M` | Overlay week or month view |
 | `←` / `→`, `T`, Escape | Overlay previous/next week (or month), today, dismiss |
+| `A`, `I`, `⌘V` | Overlay alarm, AI add, paste a screenshot into AI add |
 
 ## Validate
 
@@ -72,7 +75,15 @@ This runs the platform-neutral tests, then compiles the native app with Xcode wi
 swift test --parallel
 ```
 
-Tests use temporary databases and mock URLSession transports; they do not touch your Google account. The Xcode project is checked in. After adding Swift source files, regenerate it with `python3 scripts/generate_project.py`.
+Tests use temporary databases and mock URLSession transports; they do not touch your Google account.
+
+AI add has a tiered live benchmark, skipped by default. It sends the 46 cases in `Tests/Fixtures/EventImages` (fictional screenshots of emails, event pages, chats, tickets and posters, plus typed text, regenerated with `python3 scripts/make_event_fixtures.py`) and compares the results with `cases.json`. Tier 1 is simple, tier 2 needs context (relative dates, durations, time zones, several events), tier 3 is traps (changed plans, cancellations, wrong weekdays, ambiguity that must be flagged), tier 4 is app controls (repeat rules, a named calendar, reminders). Models named `claude-…` use the Anthropic API (`ANTHROPIC_API_KEY`, plus `ANTHROPIC_WORKSPACE_ID` for keys not scoped to a workspace):
+
+```sh
+EC_LIVE_AI=1 OPENAI_API_KEY=sk-… EC_AI_MODEL=gpt-6.1-sol EC_AI_REASONING=medium EC_AI_REPEATS=3 \
+  EC_AI_JSON=results/gpt-6.1-sol-medium.json swift test --filter LiveEventExtraction
+python3 scripts/summarize_event_benchmark.py results
+``` The Xcode project is checked in. After adding Swift source files, regenerate it with `python3 scripts/generate_project.py`.
 
 Validated on macOS with Xcode: the app compiles and **all tests pass**, covering SQLite isolation/rollback, OAuth-token retry, MIME/attachments, history and sync-token recovery, sender/filter undo, account-switch cancellation, Bubble Up, drafts/sending, recurrence, invitations and confirmed-write recovery. All 29 app source files passed parsing for the macOS 15 target, and the project references, scheme and resource plists parsed successfully. Native SDK compilation is covered by the added macOS CI workflow but has not run here.
 

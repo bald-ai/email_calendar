@@ -127,6 +127,23 @@ private struct ActionBarButton: View {
 
 enum MailComposeAction: Equatable { case reply, replyAll, forward, editDraft }
 
+extension MailMessage {
+    /// The HTML body with `cid:` images swapped for data URLs, from the message or from `images` (keyed by content ID).
+    func html(inliningImages images: [String: Data]) -> String? {
+        guard var html else { return nil }
+        for attachment in attachments {
+            guard let contentID = attachment.contentID, let data = attachment.inlineData ?? images[contentID],
+                  attachment.mimeType.range(of: #"^image/[a-zA-Z0-9.+-]+$"#, options: .regularExpression) != nil else { continue }
+            let source = "data:\(attachment.mimeType);base64,\(data.base64EncodedString())"
+            html = html.replacingOccurrences(of: "cid:\(contentID)", with: source, options: .caseInsensitive)
+            if let encoded = contentID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
+                html = html.replacingOccurrences(of: "cid:\(encoded)", with: source, options: .caseInsensitive)
+            }
+        }
+        return html
+    }
+}
+
 private struct MailMessageCard: View {
     @Environment(AppStore.self) private var store
     var message: MailMessage
@@ -232,19 +249,7 @@ private struct MailMessageCard: View {
         }
     }
 
-    private var resolvedHTML: String? {
-        guard var html = message.html else { return nil }
-        for attachment in message.attachments {
-            guard let contentID = attachment.contentID, let data = attachment.inlineData ?? inlineImages[contentID],
-                  attachment.mimeType.range(of: #"^image/[a-zA-Z0-9.+-]+$"#, options: .regularExpression) != nil else { continue }
-            let source = "data:\(attachment.mimeType);base64,\(data.base64EncodedString())"
-            html = html.replacingOccurrences(of: "cid:\(contentID)", with: source, options: .caseInsensitive)
-            if let encoded = contentID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
-                html = html.replacingOccurrences(of: "cid:\(encoded)", with: source, options: .caseInsensitive)
-            }
-        }
-        return html
-    }
+    private var resolvedHTML: String? { message.html(inliningImages: inlineImages) }
 
     private func saveAttachment(_ attachment: MailAttachment, open: Bool) async {
         downloading.insert(attachment.id)

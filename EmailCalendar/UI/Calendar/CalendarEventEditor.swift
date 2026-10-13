@@ -12,7 +12,9 @@ struct CalendarEventEditor: View {
     @State private var asksDelete = false
     @State private var customRecurrence = ""
     @State private var repeatChoice: RepeatChoice
-    private let original: CalendarEvent
+    @State private var original: CalendarEvent
+    /// Set when shown as a panel (in the overlay) instead of a sheet.
+    private let onDone: (() -> Void)?
 
     private enum RepeatChoice: String, CaseIterable {
         case never = "Does not repeat", daily = "Daily", weekdays = "Weekdays", weekly = "Weekly", monthly = "Monthly", yearly = "Yearly", custom = "Custom"
@@ -28,8 +30,9 @@ struct CalendarEventEditor: View {
         }
     }
 
-    init(event: CalendarEvent) {
-        original = event
+    init(event: CalendarEvent, onDone: (() -> Void)? = nil) {
+        _original = State(initialValue: event)
+        self.onDone = onDone
         _event = State(initialValue: event)
         let exact = RepeatChoice.allCases.first { $0.rule != nil && event.recurrence == [$0.rule!] }
         _repeatChoice = State(initialValue: event.recurrence.isEmpty ? .never : (exact ?? .custom))
@@ -59,7 +62,7 @@ struct CalendarEventEditor: View {
                 HStack {
                     Text(original.id.isEmpty ? "NEW EVENT" : "EVENT").font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.secondary)
                     Spacer()
-                    Button { dismiss() } label: { Image(systemName: "xmark") }.buttonStyle(QuietButtonStyle())
+                    Button { close() } label: { Image(systemName: "xmark") }.buttonStyle(QuietButtonStyle())
                         .foregroundStyle(Theme.secondary).keyboardShortcut(.cancelAction).help("Close (Esc)")
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -122,7 +125,7 @@ struct CalendarEventEditor: View {
                                     let fill = response == .accepted ? Theme.yes : (response == .declined ? Theme.no : Theme.secondary)
                                     Button(response == .accepted ? "Yes" : (response == .declined ? "No" : "Maybe")) {
                                         Task {
-                                            if await store.respondToEvent(event, response: response) { dismiss() }
+                                            if await store.respondToEvent(event, response: response) { close() }
                                             else { failure = store.errorMessage ?? "Could not update your response." }
                                         }
                                     }.buttonStyle(PillButtonStyle(fill: selected ? fill : fill.opacity(0.25)))
@@ -175,6 +178,10 @@ struct CalendarEventEditor: View {
         }
     }
 
+    private func close() {
+        if let onDone { onDone() } else { dismiss() }
+    }
+
     private var startBinding: Binding<Date> {
         Binding(get: { event.start }, set: { date in
             let duration = event.end.timeIntervalSince(event.start)
@@ -200,9 +207,15 @@ struct CalendarEventEditor: View {
         isSaving = true
         failure = nil
         Task {
-            let saved = await store.saveEvent(updated, scope: scope, originalCalendarID: original.calendarID)
+            let saved = await store.saveEvent(updated, scope: scope, originalCalendarID: original.calendarID, originalEvent: original,
+                                              recoverMovedEdit: { pending in
+                                                  event = pending; original = pending
+                                                  repeatChoice = pending.recurrence.isEmpty ? .never :
+                                                      (RepeatChoice.allCases.first { $0.rule != nil && pending.recurrence == [$0.rule!] } ?? .custom)
+                                                  customRecurrence = pending.recurrence.joined(separator: "\n")
+                                              })
             isSaving = false
-            if saved { dismiss() } else { failure = store.errorMessage ?? "Could not save this event." }
+            if saved { close() } else { failure = store.errorMessage ?? "Could not save this event." }
         }
     }
 
@@ -212,7 +225,7 @@ struct CalendarEventEditor: View {
         Task {
             let deleted = await store.deleteEvent(original, scope: scope)
             isSaving = false
-            if deleted { dismiss() } else { failure = store.errorMessage ?? "Could not delete this event." }
+            if deleted { close() } else { failure = store.errorMessage ?? "Could not delete this event." }
         }
     }
 }
@@ -220,6 +233,8 @@ struct CalendarEventEditor: View {
 struct CalendarEventDetail: View {
     @Environment(AppStore.self) private var store
     let event: CalendarEvent
+    /// Edits right here, in a panel, without leaving for the main window.
+    let onEdit: () -> Void
     let onOpen: () -> Void
 
     var body: some View {
@@ -241,7 +256,13 @@ struct CalendarEventDetail: View {
                     Button("Decline") { Task { await store.respondToEvent(event, response: .declined) } }
                 }.buttonStyle(.bordered).controlSize(.small)
             }
-            Button("Open in app", action: onOpen).frame(maxWidth: .infinity, alignment: .trailing)
+            HStack {
+                Button { onOpen() } label: { Label("Open in app", systemImage: "arrow.up.right.square") }
+                    .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button(action: onEdit) { Label("Edit", systemImage: "pencil") }
+                    .buttonStyle(PillButtonStyle(fill: Theme.accent)).keyboardShortcut(.defaultAction)
+            }
         }.padding(16).frame(width: 300)
     }
 

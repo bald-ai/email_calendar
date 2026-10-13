@@ -12,32 +12,7 @@ enum CalendarGeometry {
 
     /// Events grouped by the days they touch, so a grid cell looks up its day instead of
     /// scanning every event.
-    struct DayIndex {
-        private(set) var all: [CalendarEvent] = []
-        private var byDay: [Date: [CalendarEvent]] = [:]
-
-        init(_ events: [CalendarEvent] = []) {
-            all = events
-            let calendar = CalendarGeometry.calendar
-            for event in events {
-                var day = calendar.startOfDay(for: event.start)
-                let last = max(event.start, event.end.addingTimeInterval(-1))
-                var count = 0
-                while day <= last && count < 400 {
-                    byDay[day, default: []].append(event)
-                    day = calendar.date(byAdding: .day, value: 1, to: day)!
-                    count += 1
-                }
-            }
-            for key in byDay.keys {
-                byDay[key]!.sort { ($0.isAllDay ? 0 : 1, $0.start) < ($1.isAllDay ? 0 : 1, $1.start) }
-            }
-        }
-
-        func events(on day: Date) -> [CalendarEvent] {
-            byDay[CalendarGeometry.calendar.startOfDay(for: day)] ?? []
-        }
-    }
+    typealias DayIndex = EventDayIndex
 
     static func days(inWeekContaining date: Date) -> [Date] {
         let calendar = calendar

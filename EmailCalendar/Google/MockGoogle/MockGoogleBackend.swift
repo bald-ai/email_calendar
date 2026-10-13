@@ -26,10 +26,11 @@ public final class MockGoogleBackend: @unchecked Sendable {
         } else {
             state = MockSeed.make(now: now)
         }
-        if (state.seedVersion ?? 1) < 3 {
-            // Existing demo data is upgraded in place, without a reset.
+        if (state.seedVersion ?? 1) < 4 {
+            // Existing demo data is upgraded in place, without a reset: the generated filler is
+            // replaced (version 4 has about half as many events); seeded and your own events stay.
             MockSeed.addBusyCalendar(into: &state, now: now)
-            state.seedVersion = 3
+            state.seedVersion = 4
         }
         persist()
     }
@@ -351,8 +352,11 @@ public final class MockGoogleBackend: @unchecked Sendable {
         case ("POST", 3):
             guard writable else { throw MockFailure(403, "You need to have writer access to this calendar.") }
             let patch = try decode(MockEventBody.self, body)
+            if let id = patch.id, state.events.contains(where: { $0.calendarID == calendarID && $0.event.id == id }) {
+                throw MockFailure(409, "Event ID already exists")
+            }
             state.idCounter += 1
-            var event = GoogleEvent(id: "ev\(state.idCounter)", summary: patch.summary ?? "", start: patch.start ?? GoogleEventDateTime(),
+            var event = GoogleEvent(id: patch.id ?? "ev\(state.idCounter)", summary: patch.summary ?? "", start: patch.start ?? GoogleEventDateTime(),
                                     end: patch.end ?? GoogleEventDateTime(), description: patch.description, location: patch.location,
                                     recurrence: patch.recurrence?.isEmpty == true ? nil : patch.recurrence, attendees: patch.attendees)
             event.status = "confirmed"
@@ -577,6 +581,7 @@ public final class MockGoogleBackend: @unchecked Sendable {
     private struct MessageListBody: Encodable { var messages: [GoogleMailMessage]; var nextPageToken: String? }
     private struct DraftListBody: Encodable { var drafts: [GoogleDraft] }
     private struct MockEventBody: Decodable {
+        var id: String?
         var summary: String?, description: String?, location: String?
         var start: GoogleEventDateTime?, end: GoogleEventDateTime?
         var recurrence: [String]?, attendees: [GoogleAttendee]?

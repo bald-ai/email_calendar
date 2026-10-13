@@ -5,14 +5,22 @@ import AppKit
 /// The drop-down calendar: a continuously scrolling week timeline, or a scrolling month.
 struct OverlayWeekView: View {
     let store: AppStore
+    let assistant: EventAssistant
+    let panels: OverlayPanels
     let onClose: () -> Void
+    let onPickImages: () -> Void
     let onOpenInApp: (CalendarEvent?) -> Void
-    let onResizeChanged: (CGFloat) -> Void
+    let onResizeChanged: () -> Void
     let onResizeEnded: () -> Void
     /// Asks the panel for room: in month view, enough height to show every event of the busiest day.
     let onPreferredHeight: (CGFloat?) -> Void
+    /// Gives the overlay keyboard focus back after a popover or panel took it.
+    let onRefocus: () -> Void
 
     enum Mode: String, CaseIterable { case week = "Week", month = "Month" }
+    /// Days in the week timeline and week rows in the month view (also the scroll physics' snap units).
+    static let dayCount = 7 * 26
+    static let weekCount = 78
 
     @AppStorage("overlay.mode") private var mode: Mode = .week
     @State private var weekPosition: ScrollPosition
@@ -35,30 +43,35 @@ struct OverlayWeekView: View {
     @State private var quickAddError: String?
     @FocusState private var titleFocused: Bool
     @FocusState private var overlayFocused: Bool
+    /// Letter shortcuts stay off while you type in a field or a panel is open.
+    private var typing: Bool { titleFocused || panelOpen }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Built once per summon: the overlay is recreated each time it opens, centered on today.
-    private let days: [Date]
-    private let weeks: [Date]
+    @State private var days: [Date]
+    @State private var weeks: [Date]
 
-    init(store: AppStore, onClose: @escaping () -> Void, onOpenInApp: @escaping (CalendarEvent?) -> Void,
-         onResizeChanged: @escaping (CGFloat) -> Void, onResizeEnded: @escaping () -> Void,
-         onPreferredHeight: @escaping (CGFloat?) -> Void = { _ in }) {
-        self.store = store; self.onClose = onClose; self.onOpenInApp = onOpenInApp
+    init(store: AppStore, assistant: EventAssistant, panels: OverlayPanels, onClose: @escaping () -> Void, onPickImages: @escaping () -> Void,
+         onOpenInApp: @escaping (CalendarEvent?) -> Void,
+         onResizeChanged: @escaping () -> Void, onResizeEnded: @escaping () -> Void,
+         onPreferredHeight: @escaping (CGFloat?) -> Void = { _ in }, onRefocus: @escaping () -> Void = {}) {
+        self.store = store; self.assistant = assistant; self.panels = panels; self.onClose = onClose; self.onPickImages = onPickImages
+        self.onOpenInApp = onOpenInApp
         self.onResizeChanged = onResizeChanged; self.onResizeEnded = onResizeEnded
         self.onPreferredHeight = onPreferredHeight
+        self.onRefocus = onRefocus
         let calendar = CalendarGeometry.calendar
         let thisWeek = calendar.dateInterval(of: .weekOfYear, for: .now)!.start
-        let firstDay = calendar.date(byAdding: .weekOfYear, value: -8, to: thisWeek)!
-        days = (0..<(7 * 26)).map { calendar.date(byAdding: .day, value: $0, to: firstDay)! }
-        let firstWeek = calendar.date(byAdding: .weekOfYear, value: -26, to: thisWeek)!
-        weeks = (0..<78).map { calendar.date(byAdding: .weekOfYear, value: $0, to: firstWeek)! }
+        let initialDays = CalendarNavigation.timelineDays(around: .now, count: Self.dayCount, calendar: calendar)
+        _days = State(initialValue: initialDays)
+        let initialWeeks = CalendarNavigation.monthWeeks(around: .now, count: Self.weekCount, calendar: calendar)
+        _weeks = State(initialValue: initialWeeks)
         // Views start where they should be, instead of being scrolled after they appear.
-        let startDay = days.first { calendar.isDate($0, inSameDayAs: thisWeek) } ?? thisWeek
+        let startDay = initialDays.first { calendar.isDate($0, inSameDayAs: thisWeek) } ?? thisWeek
         _weekPosition = State(initialValue: ScrollPosition(id: startDay, anchor: .leading))
         _hourPosition = State(initialValue: ScrollPosition(y: OverlayTimeline.nowOffset()))
         _weekFirstVisible = State(initialValue: thisWeek)
-        _monthStartRow = State(initialValue: Self.monthRow(for: .now, in: weeks))
+        _monthStartRow = State(initialValue: Self.monthRow(for: .now, in: initialWeeks))
     }
 
     /// The week row placed at the top so the target (today, or a month's 1st) is in the second row.
@@ -79,8 +92,7 @@ struct OverlayWeekView: View {
 
     /// Month view: five rows, each tall enough for the busiest day of the month in view.
     private var preferredHeight: CGFloat? {
-        guard mode == .month else { return nil }
-        return Self.monthHeight(index: index, month: sizedMonth, chrome: chromeHeight)
+        mode == .month ? Self.monthHeight(index: index, month: sizedMonth, chrome: chromeHeight) : nil
     }
 
     /// Also used by the panel before it opens, so month view appears already stretched.
@@ -133,9 +145,11 @@ struct OverlayWeekView: View {
             Capsule().fill(Color.secondary.opacity(0.3)).frame(width: 42, height: 3)
                 .frame(maxWidth: .infinity).frame(height: 8)
                 .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 1).onChanged { onResizeChanged($0.translation.height) }.onEnded { _ in onResizeEnded() })
+                .gesture(DragGesture(minimumDistance: 1).onChanged { _ in onResizeChanged() }.onEnded { _ in onResizeEnded() })
                 .onHover { hovering in if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() } }
         }
+        .overlay(alignment: .top) { dimming.padding(.top, chromeHeight - 9) }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: panelOpen)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .foregroundStyle(Theme.text)
         .background(Theme.window.opacity(0.86)).background(.ultraThinMaterial)
@@ -148,29 +162,49 @@ struct OverlayWeekView: View {
             let span = DateInterval(start: weeks.first!, end: CalendarGeometry.calendar.date(byAdding: .weekOfYear, value: 1, to: weeks.last!)!)
             Task { await store.refreshCalendar(range: span) }
         }
+        .onChange(of: days) { _, days in
+            let interval = DateInterval(start: days.first!, end: CalendarGeometry.calendar.date(byAdding: .day, value: 1, to: days.last!)!)
+            Task { await store.refreshCalendar(range: interval) }
+        }
+        .onChange(of: weeks) { _, weeks in
+            let interval = DateInterval(start: weeks.first!, end: CalendarGeometry.calendar.date(byAdding: .weekOfYear, value: 1, to: weeks.last!)!)
+            Task { await store.refreshCalendar(range: interval) }
+        }
         .onChange(of: store.events, initial: true) { rebuildIndex() }
         .onChange(of: store.calendars) { rebuildIndex() }
         .onChange(of: preferredHeight, initial: true) { _, height in onPreferredHeight(height) }
+        // A closed popover or panel leaves the overlay without keyboard focus; take it back.
+        .onChange(of: selectedEvent) { _, event in if event == nil { overlayFocused = true; onRefocus() } }
+        .onChange(of: panels.current) { _, kind in if kind == nil { overlayFocused = true; onRefocus() } }
         .onKeyPress(.escape) {
-            if quickAddDate != nil { quickAddDate = nil; overlayFocused = true } else { onClose() }
+            if quickAddDate != nil { quickAddDate = nil; overlayFocused = true }
+            else if panelOpen { closePanels() }
+            else { onClose() }
             return .handled
         }
-        .onKeyPress(.leftArrow) { guard !titleFocused else { return .ignored }; step(-1); return .handled }
-        .onKeyPress(.rightArrow) { guard !titleFocused else { return .ignored }; step(1); return .handled }
-        .onKeyPress(characters: CharacterSet(charactersIn: "tTwWmM")) { press in
-            guard !titleFocused else { return .ignored }
+        .onKeyPress(.leftArrow) { guard !typing else { return .ignored }; step(-1); return .handled }
+        .onKeyPress(.rightArrow) { guard !typing else { return .ignored }; step(1); return .handled }
+        .onKeyPress(characters: CharacterSet(charactersIn: "tTwWmMaAiI")) { press in
+            guard !typing else { return .ignored }
             switch press.characters.lowercased() {
             case "w": switchMode(.week)
             case "m": switchMode(.month)
+            case "a": openAlarmPanel()
+            case "i": openAssistant()
             default: goToToday()
             }
             return .handled
         }
         .popover(item: $selectedEvent, arrowEdge: .bottom) { event in
-            CalendarEventDetail(event: event) {
+            CalendarEventDetail(event: event, onEdit: {
+                selectedEvent = nil
+                quickAddDate = nil
+                // Let the popover finish closing, then bring the editor in.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { panels.show(.edit(event)) }
+            }, onOpen: {
                 selectedEvent = nil
                 onOpenInApp(event)
-            }.id(event.cacheID).environment(store)
+            }).id(event.cacheID).environment(store)
         }
     }
 
@@ -191,11 +225,20 @@ struct OverlayWeekView: View {
             }
             .padding(2).background(.white.opacity(0.07), in: Capsule())
             modeSwitch
+            Button(action: openAlarmPanel) {
+                Image(systemName: store.alarms.alarms.isEmpty ? "alarm" : "alarm.fill")
+                    .foregroundStyle(store.alarms.alarms.isEmpty ? Theme.text : Theme.unread)
+            }.help("Set an alarm (A)")
+            Button { panels.current == .assistant ? closePanels() : openAssistant() } label: {
+                Image(systemName: "sparkles").foregroundStyle(panels.current == .assistant ? Theme.accent : Theme.text)
+            }.help("AI add: describe an event or paste a screenshot (I, ⌘V)")
             Button {
                 store.navigation = .calendar
                 onOpenInApp(nil)
             } label: { Image(systemName: "arrow.up.right.square") }.help("Open calendar in app")
             Button(action: onClose) { Image(systemName: "xmark") }.help("Close (Esc)")
+            Rectangle().fill(Theme.line).frame(width: 1, height: 16).padding(.horizontal, 2)
+            MenuBarClock()
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 16).padding(.vertical, 10)
@@ -262,6 +305,14 @@ struct OverlayWeekView: View {
                 } else {
                     Text(store.account == nil ? "Sign in to see your week" : "Nothing coming up.").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
+                if let alarm = store.alarms.alarms.first, panels.current != .alarm {
+                    Label(alarm.fireAt.formatted(date: .omitted, time: .shortened) + " · " + alarm.label, systemImage: "alarm.fill")
+                        .font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(Theme.unread.opacity(0.22), in: Capsule())
+                        .onTapGesture(perform: openAlarmPanel)
+                        .help("Next alarm · \(store.alarms.alarms.count) set")
+                }
             }
         }
     }
@@ -273,12 +324,49 @@ struct OverlayWeekView: View {
                 TextField("Event title", text: $quickAddTitle).textFieldStyle(.plain).focused($titleFocused)
                     .onSubmit(addEvent)
                 if adding { ProgressView().controlSize(.mini) }
+                if date > .now {
+                    Button {
+                        store.alarms.add(at: date, label: quickAddTitle)
+                        quickAddDate = nil; overlayFocused = true
+                    } label: { Label("Alarm", systemImage: "alarm") }
+                        .buttonStyle(PillButtonStyle(fill: Theme.unread))
+                        .help("Ring at \(date.formatted(date: .omitted, time: .shortened)) instead of adding an event")
+                }
                 Button("Add", action: addEvent).buttonStyle(PillButtonStyle(fill: Theme.accent))
                     .disabled(adding || quickAddTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button { quickAddDate = nil; overlayFocused = true } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
             }
             if let quickAddError { Text(quickAddError).font(.caption2).foregroundStyle(.secondary).lineLimit(2) }
         }.padding(.horizontal, 16).padding(.vertical, 7)
+    }
+
+    // MARK: Panels
+
+    /// The alarm, AI add and the editor float in their own window (see OverlayController);
+    /// here the calendar just dims behind them.
+    private var panelOpen: Bool { panels.current != nil }
+
+    private func openAlarmPanel() {
+        quickAddDate = nil
+        panels.show(.alarm)
+    }
+
+    private func openAssistant() {
+        quickAddDate = nil
+        assistant.open()   // Shows the panel (EventAssistant.onOpen).
+    }
+
+    private func closePanels() {
+        panels.close()
+        overlayFocused = true
+    }
+
+    @ViewBuilder
+    private var dimming: some View {
+        if panelOpen {
+            Color.black.opacity(0.35).contentShape(Rectangle()).onTapGesture(perform: closePanels)
+                .transition(.opacity)
+        }
     }
 
     // MARK: Navigation
@@ -316,7 +404,8 @@ struct OverlayWeekView: View {
     private func scrollWeek(to date: Date, animated: Bool, centerHours: Bool = false) {
         let calendar = CalendarGeometry.calendar
         let weekStart = calendar.dateInterval(of: .weekOfYear, for: date)!.start
-        guard let day = days.first(where: { calendar.isDate($0, inSameDayAs: weekStart) }) else { return }
+        if !days.contains(where: { calendar.isDate($0, inSameDayAs: weekStart) }) { prepareWeek(at: date) }
+        let day = weekStart
         withAnimation(animated ? animation : nil) {
             weekPosition.scrollTo(id: day, anchor: .leading)
             if centerHours { hourPosition.scrollTo(y: OverlayTimeline.nowOffset()) }
@@ -329,6 +418,7 @@ struct OverlayWeekView: View {
         // This month centers on today; any other month starts at its 1st.
         let target = calendar.isDate(date, equalTo: .now, toGranularity: .month)
             ? Date.now : (calendar.dateInterval(of: .month, for: date)?.start ?? date)
+        ensureMonthRange(around: target)
         monthRequest = OverlayMonth.Request(week: Self.monthRow(for: target, in: weeks), animated: animated && !reduceMotion)
         monthFocus = target
         sizedMonth = target
@@ -343,14 +433,26 @@ struct OverlayWeekView: View {
     private func prepareWeek(at date: Date) {
         let calendar = CalendarGeometry.calendar
         let weekStart = calendar.dateInterval(of: .weekOfYear, for: date)!.start
-        let day = days.first { calendar.isDate($0, inSameDayAs: weekStart) } ?? days[0]
+        if !days.contains(where: { calendar.isDate($0, inSameDayAs: weekStart) }) {
+            days = CalendarNavigation.timelineDays(around: date, count: Self.dayCount, calendar: calendar)
+        }
+        let day = weekStart
         weekFirstVisible = day
         weekPosition = ScrollPosition(id: day, anchor: .leading)
+    }
+
+    private func ensureMonthRange(around date: Date) {
+        let calendar = CalendarGeometry.calendar
+        let row = calendar.date(byAdding: .weekOfYear, value: -1, to: calendar.dateInterval(of: .weekOfYear, for: date)!.start)!
+        if !weeks.contains(where: { calendar.isDate($0, inSameDayAs: row) }) {
+            weeks = CalendarNavigation.monthWeeks(around: date, count: Self.weekCount, calendar: calendar)
+        }
     }
 
     private func prepareMonth(at date: Date) {
         let calendar = CalendarGeometry.calendar
         let target = calendar.isDate(date, equalTo: .now, toGranularity: .month) ? Date.now : date
+        ensureMonthRange(around: target)
         monthStartRow = Self.monthRow(for: target, in: weeks)
         monthRequest = nil
         monthFocus = target
@@ -398,6 +500,20 @@ struct OverlayWeekView: View {
             return "Next: \(title) in \(hours)h\(remainder == 0 ? "" : " \(remainder)m")"
         }
         return "Next: \(title) · \(event.start.formatted(.dateTime.weekday(.abbreviated).hour().minute()))"
+    }
+}
+
+/// The overlay covers the Mac's menu bar, clock included, so it shows its own in the same place.
+private struct MenuBarClock: View {
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            let date = context.date
+            Text("\(date.formatted(.dateTime.weekday(.abbreviated))) \(date.formatted(.dateTime.day().month(.abbreviated)))  \(date.formatted(date: .omitted, time: .shortened))")
+                .font(.system(size: 13, weight: .medium)).monospacedDigit()
+                .foregroundStyle(Theme.text.opacity(0.9))
+                .fixedSize()
+                .help(date.formatted(date: .complete, time: .omitted))
+        }
     }
 }
 
@@ -455,7 +571,12 @@ private struct OverlayTimeline: View {
                         .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.x }) { _, x in
                             offsetX = x
                             let index = min(max(0, Int((x / width).rounded())), days.count - 1)
-                            if !CalendarGeometry.calendar.isDate(firstVisible, inSameDayAs: days[index]) { firstVisible = days[index] }
+                            if !CalendarGeometry.calendar.isDate(firstVisible, inSameDayAs: days[index]) {
+                                // Instant while scrolling: the title's rolling digits garble when days fly past.
+                                var instant = Transaction()
+                                instant.disablesAnimations = true
+                                withTransaction(instant) { firstVisible = days[index] }
+                            }
                         }
                         .frame(height: 24 * Self.hourHeight)
                     }
@@ -704,7 +825,11 @@ private struct OverlayMonth: View {
                     if row != topIndex { topIndex = row }
                     // The month of the second visible row's middle day names what you're looking at.
                     let middle = CalendarGeometry.calendar.date(byAdding: .day, value: 3, to: weeks[min(weeks.count - 1, row + 1)])!
-                    if !CalendarGeometry.calendar.isDate(middle, equalTo: focusMonth, toGranularity: .month) { focusMonth = middle }
+                    if !CalendarGeometry.calendar.isDate(middle, equalTo: focusMonth, toGranularity: .month) {
+                        var instant = Transaction()
+                        instant.disablesAnimations = true
+                        withTransaction(instant) { focusMonth = middle }
+                    }
                 }
             }
         }

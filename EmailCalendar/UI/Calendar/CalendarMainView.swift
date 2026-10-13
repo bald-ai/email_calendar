@@ -8,6 +8,7 @@ struct CalendarMainView: View {
     @State private var scrollToNow = UUID()
     @State private var editing: CalendarEvent?
     @State private var showCalendars = false
+    @State private var index = EventDayIndex()
 
     private enum Mode: String, CaseIterable { case day = "Day", week = "Week", month = "Month" }
     private var visibleEvents: [CalendarEvent] {
@@ -35,12 +36,12 @@ struct CalendarMainView: View {
             if store.calendars.isEmpty {
                 ContentUnavailableView("Your calendars", systemImage: "calendar", description: Text("Sign in with Google to bring your calendars here."))
             } else if mode == .month {
-                CalendarMonthGrid(anchor: anchor, events: visibleEvents, calendars: store.calendars, onEvent: { editing = $0 }, onDay: { date in
+                CalendarMonthGrid(anchor: anchor, index: index, calendars: store.calendars, onEvent: { editing = $0 }, onDay: { date in
                     anchor = date; mode = .day
                 }, onNew: createEvent)
             } else {
                 CalendarWeekGrid(days: mode == .day ? [Calendar.current.startOfDay(for: anchor)] : CalendarGeometry.days(inWeekContaining: anchor),
-                                 events: visibleEvents, calendars: store.calendars, scrollToNow: scrollToNow,
+                                 index: index, calendars: store.calendars, scrollToNow: scrollToNow,
                                  onEvent: { editing = $0 }, onEmptySlot: createEvent)
             }
         }
@@ -70,6 +71,8 @@ struct CalendarMainView: View {
                 }.disabled(!store.calendars.contains(where: \.canEdit))
             }
         }
+        .onChange(of: store.events, initial: true) { index = EventDayIndex(visibleEvents) }
+        .onChange(of: store.calendars) { index = EventDayIndex(visibleEvents) }
         .task(id: "\(mode.rawValue)-\(range.start.timeIntervalSince1970)") { await store.refreshCalendar(range: range) }
         .sheet(item: $editing, onDismiss: { store.selectedEventID = nil }) { event in CalendarEventEditor(event: event).id(event.cacheID).environment(store) }
         .onChange(of: store.selectedEventID) { _, eventID in
@@ -103,7 +106,7 @@ struct CalendarMainView: View {
 
 private struct CalendarMonthGrid: View {
     let anchor: Date
-    let events: [CalendarEvent]
+    let index: EventDayIndex
     let calendars: [CalendarRecord]
     let onEvent: (CalendarEvent) -> Void
     let onDay: (Date) -> Void
@@ -129,7 +132,7 @@ private struct CalendarMonthGrid: View {
                                         .frame(width: 24, height: 24)
                                         .background(Calendar.current.isDateInToday(day) ? Color.accentColor.opacity(0.2) : .clear, in: Circle())
                                 }.buttonStyle(.plain)
-                                let daily = events.filter { CalendarGeometry.overlaps($0, day: day) }.sorted { $0.start < $1.start }
+                                let daily = index.events(on: day)
                                 let limit = max(1, Int((geometry.size.height / CGFloat(rows) - 50) / 22))
                                 ForEach(daily.prefix(limit), id: \.cacheID) { event in
                                     Button { onEvent(event) } label: {

@@ -83,11 +83,16 @@ public struct MailMessage: Codable, Sendable, Identifiable, Equatable {
     public var references: [String]
     public var draftID: String?
     public var replyTo: [MailAddress]
+    public var bodyIsExternal: Bool?
+    public var needsBodyHydration: Bool {
+        bodyIsExternal == true || (bodyIsExternal == nil && plainText.isEmpty && html == nil && !snippet.isEmpty)
+    }
     public init(id: String, threadID: String, accountID: String, from: MailAddress,
                 to: [MailAddress] = [], cc: [MailAddress] = [], bcc: [MailAddress] = [],
                 date: Date = .now, subject: String = "", snippet: String = "", plainText: String = "",
                 html: String? = nil, attachments: [MailAttachment] = [], labels: Set<String> = [],
-                rfcMessageID: String? = nil, references: [String] = [], draftID: String? = nil, replyTo: [MailAddress] = [], inReplyTo: String? = nil) {
+                rfcMessageID: String? = nil, references: [String] = [], draftID: String? = nil, replyTo: [MailAddress] = [], inReplyTo: String? = nil, bodyIsExternal: Bool = false) {
+        self.bodyIsExternal = bodyIsExternal
         self.id = id; self.threadID = threadID; self.accountID = accountID; self.from = from
         self.to = to; self.cc = cc; self.bcc = bcc; self.date = date; self.subject = subject
         self.snippet = snippet; self.plainText = plainText; self.html = html; self.attachments = attachments
@@ -237,15 +242,17 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Equatable {
     public var attendees: [EventAttendee]
     public var status: String
     public var etag: String?
+    /// IANA zone in which timed recurrences are expanded.
+    public var timeZone: String?
     public init(id: String = UUID().uuidString, calendarID: String, accountID: String, title: String = "",
                 start: Date = .now, end: Date = .now.addingTimeInterval(1800), isAllDay: Bool = false,
                 location: String = "", notes: String = "", recurrence: [String] = [],
                 recurringEventID: String? = nil, originalStart: Date? = nil, videoURL: URL? = nil,
-                htmlLink: URL? = nil, attendees: [EventAttendee] = [], status: String = "confirmed", etag: String? = nil) {
+                htmlLink: URL? = nil, attendees: [EventAttendee] = [], status: String = "confirmed", etag: String? = nil, timeZone: String? = nil) {
         self.id = id; self.calendarID = calendarID; self.accountID = accountID; self.title = title
         self.start = start; self.end = end; self.isAllDay = isAllDay; self.location = location; self.notes = notes
         self.recurrence = recurrence; self.recurringEventID = recurringEventID; self.originalStart = originalStart
-        self.videoURL = videoURL; self.htmlLink = htmlLink; self.attendees = attendees; self.status = status; self.etag = etag
+        self.videoURL = videoURL; self.htmlLink = htmlLink; self.attendees = attendees; self.status = status; self.etag = etag; self.timeZone = timeZone
     }
     public var isRecurring: Bool { recurringEventID != nil || !recurrence.isEmpty }
     public var isCancelled: Bool { status == "cancelled" }

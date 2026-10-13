@@ -144,9 +144,9 @@ enum MockSeed {
         return arrival
     }
 
-    /// This month full (three to six entries on weekdays) and next month lighter (one to
-    /// three), so the calendar views can be judged with a realistic schedule. Replaces the
-    /// earlier five-month batch: those events are deleted, so synced caches drop them too.
+    /// This month busy (one to three entries on weekdays) and next month light (zero or one), so
+    /// the calendar views can be judged with a realistic but readable schedule. Replaces any earlier
+    /// generated batch: those events are deleted, so synced caches drop them too.
     static func addBusyCalendar(into state: inout MockState, now: Date) {
         for index in state.events.indices where state.events[index].event.id.hasPrefix("busy") && !state.events[index].deleted {
             state.events[index].deleted = true
@@ -179,23 +179,23 @@ enum MockSeed {
             let weekend = calendar.isDateInWeekend(day)
             var entries: [(String, String)] = []
             if weekend {
-                for _ in 0..<(full ? 1 + next(2) : next(2)) {
+                for _ in 0..<(full ? next(2) : (next(4) == 0 ? 1 : 0)) {
                     entries.append(next(2) == 0 ? (family, familyTitles[next(familyTitles.count)]) : (mine, personalTitles[next(personalTitles.count)]))
                 }
             } else {
-                for _ in 0..<(full ? 2 + next(3) : 1 + next(2)) { entries.append((work, workTitles[next(workTitles.count)])) }
-                if full && next(2) == 0 { entries.append((mine, personalTitles[next(personalTitles.count)])) }
+                for _ in 0..<(full ? 1 + next(2) : next(2)) { entries.append((work, workTitles[next(workTitles.count)])) }
+                if full && next(4) == 0 { entries.append((mine, personalTitles[next(personalTitles.count)])) }
             }
             let key = dayFormatter.string(from: day)
             for (index, entry) in entries.enumerated() {
                 let hour = min(19, 9 + index * 2 + next(2))
                 let start = calendar.date(bySettingHour: hour, minute: next(2) * 30, second: 0, of: day)!
                 let minutes = [30, 45, 60, 90][next(4)]
-                var event = GoogleEvent(id: "busy3\(key.replacingOccurrences(of: "-", with: ""))x\(index)", summary: entry.1,
+                var event = GoogleEvent(id: "busy4\(key.replacingOccurrences(of: "-", with: ""))x\(index)", summary: entry.1,
                                         start: GoogleEventDateTime(dateTime: iso.string(from: start), timeZone: zone),
                                         end: GoogleEventDateTime(dateTime: iso.string(from: start.addingTimeInterval(Double(minutes) * 60)), timeZone: zone))
                 event.status = "confirmed"
-                event.etag = "\"busy3-\(key)-\(index)\""
+                event.etag = "\"busy4-\(key)-\(index)\""
                 if entry.0 == work && next(3) == 0 { event.hangoutLink = "https://meet.google.com/busy-\(key)-\(index)" }
                 state.calendarVersion += 1
                 state.events.append(MockEvent(calendarID: entry.0, event: event, version: state.calendarVersion))

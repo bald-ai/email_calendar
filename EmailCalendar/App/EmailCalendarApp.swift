@@ -39,6 +39,14 @@ struct EmailCalendarApp: App {
         MenuBarExtra("Email + Calendar", systemImage: "calendar") {
             Button("Show Week") { overlay.toggle() }
             Button("Open Email + Calendar") { store.openMainWindow() }
+            if !store.alarms.alarms.isEmpty {
+                Divider()
+                ForEach(store.alarms.alarms) { alarm in
+                    Button("Cancel ⏰ \(alarm.fireAt.formatted(date: .omitted, time: .shortened)) · \(alarm.label)") {
+                        store.alarms.cancel(alarm.id)
+                    }
+                }
+            }
             if store.isDemoMode {
                 Button("Simulate Incoming Email") { Task { await store.simulateIncomingMail() } }
             }

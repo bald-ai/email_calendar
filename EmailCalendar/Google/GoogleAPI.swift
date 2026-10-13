@@ -174,9 +174,9 @@ public actor GoogleAPI {
         try await get(GoogleEvent.self, base: .calendar, path: ["calendars", calendarID, "events", id])
     }
 
-    public func insertEvent(calendarID: String, event: GoogleEvent, sendUpdates: String = "all") async throws -> GoogleEvent {
+    public func insertEvent(calendarID: String, event: GoogleEvent, sendUpdates: String = "all", includeID: Bool = false) async throws -> GoogleEvent {
         try await mutate(GoogleEvent.self, base: .calendar, path: ["calendars", calendarID, "events"], method: "POST",
-                         query: [URLQueryItem(name: "sendUpdates", value: sendUpdates)], body: EventMutation(event, includeAttendees: true))
+                         query: [URLQueryItem(name: "sendUpdates", value: sendUpdates)], body: EventMutation(event, includeAttendees: true, includeID: includeID))
     }
 
     public func updateEvent(calendarID: String, event: GoogleEvent, sendUpdates: String = "all") async throws -> GoogleEvent {
@@ -317,6 +317,7 @@ public actor GoogleAPI {
         let attendeesOmitted = true
     }
     private struct EventMutation: Encodable, Sendable {
+        var id: String?
         var summary: String?
         var description: String?
         var location: String?
@@ -327,7 +328,8 @@ public actor GoogleAPI {
         var status: String?
         var transparency: String?
 
-        init(_ event: GoogleEvent, includeAttendees: Bool = false) {
+        init(_ event: GoogleEvent, includeAttendees: Bool = false, includeID: Bool = false) {
+            id = includeID ? event.id : nil
             summary = event.summary
             description = event.description
             location = event.location

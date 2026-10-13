@@ -56,7 +56,7 @@ struct MailHTMLView: NSViewRepresentable {
         init(height: Binding<CGFloat>) { self.height = height }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                     decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
             guard navigationAction.navigationType == .linkActivated else {
                 // Only the app's initial HTML document may navigate this view.
                 decisionHandler(navigationAction.request.url?.scheme == "about" ? .allow : .cancel)

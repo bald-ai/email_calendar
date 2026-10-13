@@ -47,7 +47,6 @@ struct AppShellView: View {
         }
         .onChange(of: store.navigation) { _, _ in
             store.closeThread()
-            store.endPowerThrough()
             if !store.searchQuery.isEmpty { endSearch() }
         }
         .onChange(of: store.searchQuery) { _, query in

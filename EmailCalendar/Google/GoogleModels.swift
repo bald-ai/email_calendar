@@ -173,7 +173,7 @@ public struct GoogleCalendar: Codable, Sendable, Identifiable {
     public var deleted: Bool?
 }
 
-public struct GoogleEventDateTime: Codable, Sendable {
+public struct GoogleEventDateTime: Codable, Sendable, Equatable {
     public var date: String?
     public var dateTime: String?
     public var timeZone: String?
@@ -185,7 +185,7 @@ public struct GoogleEventDateTime: Codable, Sendable {
     }
 }
 
-public struct GoogleAttendee: Codable, Sendable {
+public struct GoogleAttendee: Codable, Sendable, Equatable {
     public var email: String?
     public var displayName: String?
     public var organizer: Bool?
@@ -205,7 +205,7 @@ public struct GoogleAttendee: Codable, Sendable {
     }
 }
 
-public struct GoogleEvent: Codable, Sendable, Identifiable {
+public struct GoogleEvent: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var status: String?
     public var summary: String?
@@ -226,9 +226,9 @@ public struct GoogleEvent: Codable, Sendable, Identifiable {
     public var etag: String?
     public var transparency: String?
 
-    public struct ConferenceData: Codable, Sendable {
+    public struct ConferenceData: Codable, Sendable, Equatable {
         public var entryPoints: [EntryPoint]?
-        public struct EntryPoint: Codable, Sendable {
+        public struct EntryPoint: Codable, Sendable, Equatable {
             public var entryPointType: String?
             public var uri: String?
             public var label: String?

@@ -237,9 +237,10 @@ struct CalendarServiceTests {
             if request.url!.path.hasSuffix("calendarList") { return (200, Self.calendarsJSON) }
             switch number {
             case 2: return (200, "{\"items\":[\(Self.instanceJSON)],\"nextSyncToken\":\"first\"}")
-            case 3, 4: return (200, master)
-            case 5: return (200, "{\"items\":[\(updatedInstance)],\"nextSyncToken\":\"range-token\"}")
-            case 6: return (200, updatedInstance)
+            case 3: return (200, Self.instanceJSON)
+            case 4, 5: return (200, master)
+            case 6: return (200, "{\"items\":[\(updatedInstance)],\"nextSyncToken\":\"range-token\"}")
+            case 7: return (200, updatedInstance)
             default: return (400, #"{"error":{"message":"Unexpected recurrence request"}}"#)
             }
         }
@@ -257,15 +258,15 @@ struct CalendarServiceTests {
         try await service.delete(changed, scope: .allEvents)
         #expect(try await service.cachedEvents(accountID: "owner").isEmpty)
         let requests = fixture.requests()
-        #expect(requests[3].url!.path.hasSuffix("/weekly"))
-        let payload = try body(requests[3])
+        #expect(requests[4].url!.path.hasSuffix("/weekly"))
+        let payload = try body(requests[4])
         #expect(payload["recurrence"] as? [String] == ["RRULE:FREQ=WEEKLY;BYDAY=FR"])
         #expect((payload["start"] as? [String: String])?["dateTime"] == "2025-01-03T13:00:00Z")
         #expect((payload["end"] as? [String: String])?["dateTime"] == "2025-01-03T14:00:00Z")
-        #expect(requests[3].value(forHTTPHeaderField: "If-Match") == "master-etag")
-        #expect(requests[5].url!.path.hasSuffix("/\(instance.id)"))
-        #expect(try body(requests[5])["recurrence"] == nil)
-        #expect(requests[6].url!.path.hasSuffix("/weekly"))
+        #expect(requests[4].value(forHTTPHeaderField: "If-Match") == "master-etag")
+        #expect(requests[6].url!.path.hasSuffix("/\(instance.id)"))
+        #expect(try body(requests[6])["recurrence"] == nil)
+        #expect(requests[7].url!.path.hasSuffix("/weekly"))
     }
 
     @Test("Sign-out drains the actual network task before another account can use the service")
@@ -336,8 +337,9 @@ struct CalendarServiceTests {
     @Test("A successful calendar move stays cached when the following content edit fails")
     func movePartialSuccess() async throws {
         let rawJSON = #"{"id":"moving","summary":"Original title","start":{"dateTime":"2026-10-02T12:00:00Z"},"end":{"dateTime":"2026-10-02T13:00:00Z"},"etag":"moved-etag"}"#
-        let fixture = CalendarHTTPFixture { request, _ in
+        let fixture = CalendarHTTPFixture { request, number in
             if request.url!.path.hasSuffix("/move") { return (200, rawJSON) }
+            if number == 3 { return (200, rawJSON.replacingOccurrences(of: "Original title", with: "Edited title")) }
             return (400, #"{"error":{"message":"Remaining edits failed"}}"#)
         }
         let (service, store, token, directory) = try context(fixture)
@@ -351,8 +353,12 @@ struct CalendarServiceTests {
         var event = try CalendarService.event(from: raw, calendarID: "source", accountID: "owner")
         event.calendarID = "destination"
         event.title = "Edited title"
-        await #expect(throws: CalendarWriteCommittedError.self) {
+        var pending: CalendarEvent?
+        do {
             _ = try await service.update(event, originalCalendarID: "source")
+            Issue.record("A failed edit after moving must preserve an explicit retry state")
+        } catch let error as CalendarMoveIncompleteError {
+            pending = error.pendingEvent
         }
         let events = try await service.cachedEvents(accountID: "owner")
         #expect(events.count == 1)
@@ -360,6 +366,11 @@ struct CalendarServiceTests {
         #expect(events.first?.title == "Original title")
         #expect(fixture.requests().map(\.httpMethod) == ["POST", "PATCH"])
         #expect(fixture.requests()[1].value(forHTTPHeaderField: "If-Match") == "moved-etag")
+        let retry = try #require(pending)
+        #expect(retry.title == "Edited title" && retry.calendarID == "destination" && retry.etag == "moved-etag")
+        _ = try await service.update(retry, originalCalendarID: retry.calendarID)
+        #expect(fixture.requests().map(\.httpMethod) == ["POST", "PATCH", "PATCH"])
+        #expect(try await service.cachedEvents(accountID: "owner").first?.title == "Edited title")
     }
 
     private func query(_ request: URLRequest) -> [String: String] {

@@ -6,6 +6,52 @@ struct MailSnapshot: Sendable {
     var rules: [SenderRule]
     var bubbles: [BubbleRecord]
     var remoteImageSenders: Set<String>
+    var revision: UInt64 = 0
+}
+
+extension LocalStore {
+    /// All mail collections and their revision are read in one actor turn, so the stamp matches the data.
+    func mailSnapshot(accountID: String) throws -> MailSnapshot {
+        let threads = try all(MailThread.self, collection: "threads", accountID: accountID)
+        let rules = try all(SenderRule.self, collection: "senderRules", accountID: accountID)
+        let bubbles = try all(BubbleRecord.self, collection: "bubbles", accountID: accountID)
+        let images = try all(ImagePreference.self, collection: "remoteImages", accountID: accountID)
+        return MailSnapshot(account: try metadata(Account.self, key: "account", accountID: accountID),
+                            threads: threads.sorted { max($0.bubbledAt ?? .distantPast, $0.updatedAt) > max($1.bubbledAt ?? .distantPast, $1.updatedAt) },
+                            rules: rules.sorted { $0.key < $1.key }, bubbles: bubbles,
+                            remoteImageSenders: Set(images.map(\.sender)), revision: mailRevision(accountID: accountID))
+    }
+
+    /// A search page rereads only its own IDs to include any foreground changes made during download.
+    func mailSearchPage(threadIDs: [String], nextPageToken: String?, accountID: String) throws -> MailSearchPage {
+        let threads = try threadIDs.compactMap { try load(MailThread.self, id: $0, collection: "threads", accountID: accountID) }
+        return MailSearchPage(threads: threads.sorted { $0.updatedAt > $1.updatedAt }, nextPageToken: nextPageToken,
+                              revision: mailRevision(accountID: accountID))
+    }
+
+    private func mailRevision(accountID: String) -> UInt64 {
+        ["threads", "senderRules", "bubbles", "remoteImages"].reduce(UInt64(0)) {
+            $0 &+ revision(collection: $1, accountID: accountID)
+        }
+    }
+}
+
+/// Main-actor delivery may reorder concurrent reads; accept only the latest cache state per account.
+struct MailSnapshotOrder {
+    private var revisions: [String: UInt64] = [:]
+    mutating func accept(revision: UInt64, accountID: String) -> Bool {
+        if let latest = revisions[accountID], revision < latest { return false }
+        revisions[accountID] = revision
+        return true
+    }
+}
+
+private struct ImagePreference: Codable, Sendable { var sender: String }
+
+struct MailSearchPage: Sendable {
+    var threads: [MailThread]
+    var nextPageToken: String?
+    var revision: UInt64 = 0
 }
 
 struct MailSendReceipt: Sendable {
@@ -25,6 +71,7 @@ actor MailService {
     private static let specialLabels = ["HEY/Set Aside", "HEY/Bubble Up", "HEY/Screener", "HEY/Screened Out"]
     private let api: GoogleAPI
     private let store: LocalStore
+    private let undoDuration: TimeInterval
     private var labelMaps: [String: [String: String]] = [:] // Gmail ID -> stable label name.
     private var draftMaps: [String: [String: String]] = [:] // Message ID -> Gmail draft ID.
     private struct ActiveSync: Sendable { var id: UUID; var task: Task<MailSnapshot, Error> }
@@ -32,6 +79,9 @@ actor MailService {
     private var isDraining = false
     private var operationTails: [String: Task<Void, Never>] = [:]
     private var operationCancellers: [UUID: @Sendable () -> Void] = [:]
+    private var operationWaiters: [UUID: Task<Void, Never>] = [:]
+    private var threadVersions: [String: [String: UInt64]] = [:]
+    private var ruleIndexes: [String: (revision: UInt64, index: SenderRuleIndex)] = [:]
     private var undoActions: [UUID: UndoAction] = [:]
 
     private struct MessageState: Sendable { var id: String; var labels: Set<String> }
@@ -43,7 +93,6 @@ actor MailService {
         var affectedRuleKeys: Set<String> = []
         var previousRules: [SenderRule] = []
     }
-    private struct ImagePreference: Codable, Sendable { var sender: String }
 
     enum MailError: LocalizedError {
         case invalidSender, missingLabel, expiredUndo, invalidDraft, noRecipients
@@ -58,24 +107,17 @@ actor MailService {
         }
     }
 
-    init(api: GoogleAPI, store: LocalStore) { self.api = api; self.store = store }
+    init(api: GoogleAPI, store: LocalStore, undoDuration: TimeInterval = 5) { self.api = api; self.store = store; self.undoDuration = undoDuration }
 
     func cached(accountID: String) async throws -> MailSnapshot {
-        let threads = try await store.all(MailThread.self, collection: "threads", accountID: accountID)
-        let rules = try await store.all(SenderRule.self, collection: "senderRules", accountID: accountID)
-        let bubbles = try await store.all(BubbleRecord.self, collection: "bubbles", accountID: accountID)
-        let images = try await store.all(ImagePreference.self, collection: "remoteImages", accountID: accountID)
-        return MailSnapshot(account: try await store.metadata(Account.self, key: "account", accountID: accountID),
-                            threads: threads.sorted { max($0.bubbledAt ?? .distantPast, $0.updatedAt) > max($1.bubbledAt ?? .distantPast, $1.updatedAt) },
-                            rules: rules.sorted { $0.key < $1.key }, bubbles: bubbles,
-                            remoteImageSenders: Set(images.map(\.sender)))
+        try await store.mailSnapshot(accountID: accountID)
     }
 
-    func sync(account: Account) async throws -> MailSnapshot {
+    func sync(account: Account, progress: (@Sendable (MailSnapshot) async -> Void)? = nil) async throws -> MailSnapshot {
         guard !isDraining else { throw CancellationError() }
         if let syncTask = syncTasks[account.id] { return try await syncTask.task.value }
         let task = Task {
-            try await self.serialized(accountID: account.id) { try await self.performSync(account: account) }
+            try await self.performSync(account: account, progress: progress)
         }
         let syncID = UUID()
         syncTasks[account.id] = ActiveSync(id: syncID, task: task)
@@ -90,14 +132,32 @@ actor MailService {
         let syncs = Array(syncTasks.values)
         for sync in syncs { sync.task.cancel() }
         for cancel in operationCancellers.values { cancel() }
-        let tails = Array(operationTails.values)
+        let tails = Array(operationWaiters.values)
         for tail in tails { await tail.value }
         for sync in syncs { _ = try? await sync.task.value }
         undoActions.removeAll()
     }
 
     func search(query: String, account: Account) async throws -> [MailThread] {
-        try await serialized(accountID: account.id) { try await self.searchImpl(query: query, account: account) }
+        try await searchPage(query: query, account: account).threads
+    }
+
+    func searchPage(query: String, pageToken: String? = nil, account: Account) async throws -> MailSearchPage {
+        try await tracked {
+            try await self.serialized(accountID: account.id) { try await self.prepare(account: account) }
+            let page = try await self.api.listThreads(query: query, pageToken: pageToken, maxResults: 50)
+            let threads = try await self.cacheSources(page.items.map(\.id), account: account, isSync: false)
+            return try await self.store.mailSearchPage(threadIDs: threads.map(\.id), nextPageToken: page.nextPageToken, accountID: account.id)
+        }
+    }
+
+    /// Recheck only the changed result, using its RFC message IDs to bound the server query.
+    func matchesSearch(_ thread: MailThread, query: String, account: Account) async throws -> Bool {
+        let ids = thread.messages.compactMap(\.rfcMessageID).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "<>")) }
+            .filter { !$0.isEmpty && !$0.contains(where: \.isWhitespace) }
+        guard !ids.isEmpty else { return true }
+        let scoped = "(\(query)) {" + ids.map { "rfc822msgid:" + $0 }.joined(separator: " ") + "}"
+        return try await tracked { try await self.api.listThreads(query: scoped, maxResults: 1).items.contains { $0.id == thread.id } }
     }
     func fetchThread(id: String, account: Account) async throws -> MailThread {
         try await serialized(accountID: account.id) { try await self.fetchThreadImpl(id: id, account: account) }
@@ -124,7 +184,11 @@ actor MailService {
         try await serialized(accountID: account.id) { try await self.decideImpl(sender: sender, decision: decision, domain: domain, account: account) }
     }
     func undo(tokenID: UUID, account: Account) async throws {
-        try await serialized(accountID: account.id) { try await self.undoImpl(tokenID: tokenID, account: account) }
+        guard let action = undoActions[tokenID], action.accountID == account.id, action.token.expiresAt > .now else { throw MailError.expiredUndo }
+        // Reserve a timely click before it waits in the operation queue or cleanup runs.
+        undoActions.removeValue(forKey: tokenID)
+        do { try await serialized(accountID: account.id) { try await self.undoImpl(action: action, account: account) } }
+        catch { undoActions[tokenID] = action; throw error }
     }
     func setRemoteImages(sender: String, allowed: Bool, account: Account) async throws {
         try await serialized(accountID: account.id) { try await self.setRemoteImagesImpl(sender: sender, allowed: allowed, account: account) }
@@ -147,16 +211,28 @@ actor MailService {
         }
         let operationID = UUID()
         operationCancellers[operationID] = { task.cancel() }
-        defer { operationCancellers.removeValue(forKey: operationID) }
+        defer { operationCancellers.removeValue(forKey: operationID); operationWaiters.removeValue(forKey: operationID) }
+        operationWaiters[operationID] = Task { _ = try? await task.value }
         operationTails[accountID] = Task { _ = try? await task.value }
         return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
 
-    private func performSync(account: Account) async throws -> MailSnapshot {
-        try await store.setMetadata(account, key: "account", accountID: account.id)
-        try await ensureLabels(accountID: account.id)
-        try await seedApprovedRecipients(account: account)
-        try await refreshDraftMap(accountID: account.id)
+    /// Reads outside the write queue still participate in account-switch cancellation and draining.
+    private func tracked<T: Sendable>(_ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        guard !isDraining else { throw CancellationError() }
+        let id = UUID(), task = Task { try await operation() }
+        operationCancellers[id] = { task.cancel() }
+        operationWaiters[id] = Task { _ = try? await task.value }
+        defer { operationCancellers.removeValue(forKey: id); operationWaiters.removeValue(forKey: id) }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+
+    private func performSync(account: Account, progress: (@Sendable (MailSnapshot) async -> Void)?) async throws -> MailSnapshot {
+        try await serialized(accountID: account.id) {
+            try await self.store.setMetadata(account, key: "account", accountID: account.id)
+            try await self.ensureLabels(accountID: account.id)
+        }
+        try await serialized(accountID: account.id) { try await self.refreshDraftMap(accountID: account.id) }
         let cursor = try await store.metadata(String.self, key: "mailHistoryID", accountID: account.id)
         if let cursor {
             do { try await incrementalSync(account: account, cursor: cursor) }
@@ -165,7 +241,9 @@ actor MailService {
                 try await fullSync(account: account)
             }
         } else { try await fullSync(account: account) }
-        try await seedApprovedInboxSenders(account: account)
+        try await serialized(accountID: account.id) { try await self.seedApprovedInboxSenders(account: account) }
+        if let progress { await progress(try await cached(accountID: account.id)) }
+        try await seedApprovedRecipients(account: account)
         try await reconcileScreener(account: account)
         undoActions = undoActions.filter { $0.value.token.expiresAt > .now }
         return try await cached(accountID: account.id)
@@ -173,44 +251,52 @@ actor MailService {
 
     private func fullSync(account: Account) async throws {
         // Anchor before enumeration so changes made during this sync appear in the next history poll.
+        let versions = threadVersions[account.id] ?? [:]
+        let initial = try await store.all(MailThread.self, collection: "threads", accountID: account.id)
         let anchor = try await api.profile().historyId
         var ids = Set(try await threadIDs(query: "newer_than:90d"))
         for label in ["INBOX", "DRAFT"] + Self.specialLabels {
             ids.formUnion(try await threadIDs(labelIDs: [try labelID(label, accountID: account.id)]))
         }
-        let sources = try await fetchSources(Array(ids))
-        var records: [LocalStore.Record<MailThread>] = []
-        for source in sources {
-            let thread = try await mapped(source, accountID: account.id)
-            records.append(.init(id: thread.id, value: thread, sortDate: max(thread.bubbledAt ?? .distantPast, thread.updatedAt)))
+        let sources = try await cacheSources(Array(ids), account: account, isSync: true)
+        let present = Set(sources.map(\.id))
+        try await serialized(accountID: account.id) {
+            for old in initial where !present.contains(old.id) {
+                // A foreground action/search may have made an old thread relevant during enumeration.
+                guard await self.threadVersion(old.id, accountID: account.id) == versions[old.id] else { continue }
+                try await self.store.remove(id: old.id, collection: "threads", accountID: account.id)
+            }
+            try await self.store.setMetadata(anchor, key: "mailHistoryID", accountID: account.id)
         }
-        try await store.save(records, collection: "threads", accountID: account.id, replacing: true)
-        try await store.setMetadata(anchor, key: "mailHistoryID", accountID: account.id)
     }
 
     private func incrementalSync(account: Account, cursor: String) async throws {
         var pageToken: String?, ids = Set<String>(), nextCursor = cursor
         repeat {
+            try Task.checkCancellation()
             let page = try await api.history(startHistoryID: cursor, pageToken: pageToken)
             for history in page.history ?? [] { ids.formUnion(history.changedThreadIDs) }
             nextCursor = page.historyId
             pageToken = page.nextPageToken
         } while pageToken != nil
-        let sources = try await fetchSources(Array(ids))
-        let present = Set(sources.map(\.id))
-        for missing in ids.subtracting(present) { try await store.remove(id: missing, collection: "threads", accountID: account.id) }
-        for source in sources { try await save(try await mapped(source, accountID: account.id)) }
-        // Commit the cursor only after every changed thread has been persisted.
+        _ = try await cacheSources(Array(ids), account: account, isSync: true)
         try await store.setMetadata(nextCursor, key: "mailHistoryID", accountID: account.id)
     }
 
     private func seedApprovedRecipients(account: Account) async throws {
         if try await store.metadata(Bool.self, key: "sentRecipientsSeeded", accountID: account.id) == true { return }
         // Page through the entire Sent mailbox, not just the recent-mail cache window.
-        var pageToken: String?
-        var currentRules = try await store.all(SenderRule.self, collection: "senderRules", accountID: account.id)
-        repeat {
-            let page = try await api.listMessages(labelIDs: ["SENT"], pageToken: pageToken, maxResults: 500)
+        var pageToken = try await store.metadata(String.self, key: "sentRecipientsPage", accountID: account.id)
+        var restarted = false
+        while true {
+            let page: GooglePage<GoogleMailMessage>
+            do { page = try await api.listMessages(labelIDs: ["SENT"], pageToken: pageToken, maxResults: 500) }
+            catch let error as GoogleAPIError where error.statusCode == 400 && pageToken != nil && !restarted {
+                // Gmail pagination tokens are temporary; restarting is safe because approvals are idempotent.
+                try await store.removeMetadata(key: "sentRecipientsPage", accountID: account.id)
+                pageToken = nil; restarted = true
+                continue
+            }
             let api = self.api
             for offset in stride(from: 0, to: page.items.count, by: 10) {
                 let batch = Array(page.items[offset..<min(offset + 10, page.items.count)])
@@ -225,38 +311,30 @@ actor MailService {
                     for try await message in group { if let message { messages.append(message) } }
                     return messages
                 }
-                for message in messages {
-                    let recipients = MailMapping.addresses(message.header("To")) + MailMapping.addresses(message.header("Cc")) + MailMapping.addresses(message.header("Bcc"))
-                    for recipient in recipients where recipient.email != account.email.lowercased() {
-                        if rule(for: recipient.email, rules: currentRules) == nil {
-                            let approved = SenderRule(accountID: account.id, key: recipient.email, decision: .approved)
-                            try await store.save(approved, id: approved.key, collection: "senderRules", accountID: account.id)
-                            currentRules.append(approved)
-                        }
+                try await serialized(accountID: account.id) {
+                    let recipients = messages.flatMap { message in
+                        MailMapping.addresses(message.header("To")) + MailMapping.addresses(message.header("Cc")) + MailMapping.addresses(message.header("Bcc"))
                     }
+                    try await self.approveUnknown(recipients.map(\.email), account: account)
                 }
             }
             pageToken = page.nextPageToken
-        } while pageToken != nil
+            if let pageToken { try await store.setMetadata(pageToken, key: "sentRecipientsPage", accountID: account.id) }
+            else { break }
+        }
         // Incomplete seeds safely resume; existing user decisions are never overwritten.
         try await store.setMetadata(true, key: "sentRecipientsSeeded", accountID: account.id)
+        try await store.removeMetadata(key: "sentRecipientsPage", accountID: account.id)
     }
 
     /// The Screener applies to senders who appear after setup. Mail already in the Inbox at
     /// first sync stays where it is instead of being moved out of Gmail's Inbox en masse.
     private func seedApprovedInboxSenders(account: Account) async throws {
         if try await store.metadata(Bool.self, key: "inboxSendersSeeded", accountID: account.id) == true { return }
-        var rules = try await store.all(SenderRule.self, collection: "senderRules", accountID: account.id)
         let threads = try await store.all(MailThread.self, collection: "threads", accountID: account.id)
-        for thread in threads where thread.labels.contains("INBOX") {
-            for message in thread.messages where !message.labels.contains("SENT") && !message.labels.contains("DRAFT") {
-                let sender = message.from.email.lowercased()
-                guard !sender.isEmpty, sender != account.email.lowercased(), rule(for: sender, rules: rules) == nil else { continue }
-                let approved = SenderRule(accountID: account.id, key: sender, decision: .approved)
-                try await store.save(approved, id: approved.key, collection: "senderRules", accountID: account.id)
-                rules.append(approved)
-            }
-        }
+        let senders = threads.filter { $0.labels.contains("INBOX") }.flatMap(\.messages)
+            .filter { !$0.labels.contains("SENT") && !$0.labels.contains("DRAFT") }.map { $0.from.email }
+        try await approveUnknown(senders, account: account)
         try await store.setMetadata(true, key: "inboxSendersSeeded", accountID: account.id)
     }
 
@@ -282,39 +360,39 @@ actor MailService {
         try await store.setMetadata(map, key: "draftIDs", accountID: accountID)
     }
 
+    private nonisolated func screeningChange(_ thread: MailThread, rules: SenderRuleIndex, account: Account) -> (adding: Set<String>, removing: Set<String>)? {
+        guard !thread.labels.contains("TRASH"), !thread.labels.contains("SPAM"),
+              let incoming = thread.messages.reversed().first(where: { !$0.labels.contains("SENT") && !$0.labels.contains("DRAFT") && $0.from.email != account.email.lowercased() }) else { return nil }
+        let decision = rules.rule(for: incoming.from.email)?.decision
+        if decision == .blocked {
+            if thread.labels.contains("INBOX") || thread.labels.contains("HEY/Screener") || !thread.labels.contains("HEY/Screened Out") {
+                return (["HEY/Screened Out"], ["INBOX", "HEY/Screener"])
+            }
+        } else if decision == .approved && (thread.labels.contains("HEY/Screener") || thread.labels.contains("HEY/Screened Out")) {
+            return (["INBOX"], ["HEY/Screener", "HEY/Screened Out"])
+        } else if decision == nil && thread.labels.contains("INBOX") {
+            return (["HEY/Screener"], ["INBOX"])
+        }
+        return nil
+    }
+
     private func reconcileScreener(account: Account) async throws {
-        let rules = try await store.all(SenderRule.self, collection: "senderRules", accountID: account.id)
         let threads = try await store.all(MailThread.self, collection: "threads", accountID: account.id)
-        for thread in threads {
-            guard !thread.labels.contains("TRASH"), !thread.labels.contains("SPAM"),
-                  let incoming = thread.messages.reversed().first(where: { !$0.labels.contains("SENT") && !$0.labels.contains("DRAFT") && $0.from.email != account.email.lowercased() }) else { continue }
-            let decision = rule(for: incoming.from.email, rules: rules)?.decision
-            if decision == .blocked {
-                if thread.labels.contains("INBOX") || thread.labels.contains("HEY/Screener") || !thread.labels.contains("HEY/Screened Out") {
-                    _ = try await changeLabels(threadID: thread.id, adding: ["HEY/Screened Out"], removing: ["INBOX", "HEY/Screener"], account: account)
+        let rules = try await currentRuleIndex(accountID: account.id)
+        for reference in threads where screeningChange(reference, rules: rules, account: account) != nil {
+            try await serialized(accountID: account.id) {
+                guard let thread = try await self.store.load(MailThread.self, id: reference.id, collection: "threads", accountID: account.id) else { return }
+                let currentRules = try await self.currentRuleIndex(accountID: account.id)
+                if let change = self.screeningChange(thread, rules: currentRules, account: account) {
+                    _ = try await self.changeLabels(threadID: thread.id, adding: change.adding, removing: change.removing, account: account)
                 }
-            } else if decision == .approved && (thread.labels.contains("HEY/Screener") || thread.labels.contains("HEY/Screened Out")) {
-                _ = try await changeLabels(threadID: thread.id, adding: ["INBOX"], removing: ["HEY/Screener", "HEY/Screened Out"], account: account)
-            } else if decision == nil && thread.labels.contains("INBOX") {
-                _ = try await changeLabels(threadID: thread.id, adding: ["HEY/Screener"], removing: ["INBOX"], account: account)
             }
         }
     }
 
-    private func searchImpl(query: String, account: Account) async throws -> [MailThread] {
-        try await prepare(account: account)
-        let sources = try await fetchSources(try await threadIDs(query: query))
-        var threads: [MailThread] = []
-        for source in sources {
-            let thread = try await mapped(source, accountID: account.id)
-            try await save(thread); threads.append(thread)
-        }
-        return threads.sorted { $0.updatedAt > $1.updatedAt }
-    }
-
     private func fetchThreadImpl(id: String, account: Account) async throws -> MailThread {
         try await prepare(account: account)
-        let thread = try await mapped(try await api.thread(id: id), accountID: account.id)
+        let thread = try await mapped(try await hydrate(try await api.thread(id: id)), accountID: account.id)
         try await save(thread)
         return thread
     }
@@ -427,14 +505,12 @@ actor MailService {
         return token
     }
 
-    private func undoImpl(tokenID: UUID, account: Account) async throws {
-        guard let action = undoActions[tokenID], action.accountID == account.id, action.token.expiresAt > .now else { throw MailError.expiredUndo }
+    private func undoImpl(action: UndoAction, account: Account) async throws {
         try await prepare(account: account)
         if !action.affectedRuleKeys.isEmpty {
             try await replaceRules(keys: action.affectedRuleKeys, target: action.previousRules, account: account)
         }
         for state in action.threads { try await restoreThread(state, account: account) }
-        undoActions.removeValue(forKey: tokenID)
     }
 
     private func setRemoteImagesImpl(sender: String, allowed: Bool, account: Account) async throws {
@@ -478,12 +554,8 @@ actor MailService {
         } else { sent = try await api.sendMessage(raw: raw, threadID: outgoing.threadID) }
         do {
             // New correspondents become approved immediately, as the first-run Sent seed does.
-            var rules = try await store.all(SenderRule.self, collection: "senderRules", accountID: account.id)
-            for recipient in MailMapping.addresses((outgoing.to + outgoing.cc + outgoing.bcc).joined(separator: ",")) where rule(for: recipient.email, rules: rules) == nil {
-                let approved = SenderRule(accountID: account.id, key: recipient.email, decision: .approved)
-                try await store.save(approved, id: approved.key, collection: "senderRules", accountID: account.id)
-                rules.append(approved)
-            }
+            let recipients = MailMapping.addresses((outgoing.to + outgoing.cc + outgoing.bcc).joined(separator: ","))
+            try await approveUnknown(recipients.map(\.email), account: account)
             try await refreshDraftMap(accountID: account.id)
             _ = try await refresh(threadID: sent.threadId, accountID: account.id)
             return MailSendReceipt(messageID: sent.id, threadID: sent.threadId, warning: nil)
@@ -507,7 +579,7 @@ actor MailService {
     }
 
     private func register(message: String, threads: [ThreadState], accountID: String) -> MailUndoToken {
-        let token = MailUndoToken(id: UUID(), message: message, expiresAt: .now.addingTimeInterval(5))
+        let token = MailUndoToken(id: UUID(), message: message, expiresAt: .now.addingTimeInterval(undoDuration))
         undoActions[token.id] = UndoAction(token: token, accountID: accountID, threads: threads)
         return token
     }
@@ -611,15 +683,38 @@ actor MailService {
         return thread
     }
 
-    private func save(_ thread: MailThread) async throws {
+    private func threadVersion(_ id: String, accountID: String) -> UInt64? { threadVersions[accountID]?[id] }
+
+    private func save(_ thread: MailThread, background: Bool = false) async throws {
+        if !background { threadVersions[thread.accountID, default: [:]][thread.id, default: 0] &+= 1 }
         try await store.save(thread, id: thread.id, collection: "threads", accountID: thread.accountID, sortDate: max(thread.bubbledAt ?? .distantPast, thread.updatedAt))
     }
 
-    private func rule(for sender: String, rules: [SenderRule]) -> SenderRule? {
-        let sender = sender.lowercased()
-        if let exact = rules.first(where: { $0.key == sender }) { return exact }
-        guard let at = sender.lastIndex(of: "@") else { return nil }
-        return rules.first { $0.key == String(sender[at...]) }
+    private func currentRuleIndex(accountID: String) async throws -> SenderRuleIndex {
+        let cached = ruleIndexes[accountID]
+        if let snapshot = try await store.snapshot(SenderRule.self, collection: "senderRules", accountID: accountID,
+                                                  ifChangedSince: cached?.revision) {
+            let index = SenderRuleIndex(snapshot.values)
+            ruleIndexes[accountID] = (snapshot.revision, index)
+            return index
+        }
+        return cached?.index ?? SenderRuleIndex()
+    }
+
+    /// Called under the account's write queue, so user decisions win over historical auto-approval.
+    private func approveUnknown(_ addresses: [String], account: Account) async throws {
+        var index = try await currentRuleIndex(accountID: account.id)
+        var additions: [LocalStore.Record<SenderRule>] = []
+        for address in addresses {
+            let address = address.lowercased()
+            guard !address.isEmpty, address != account.email.lowercased(), index.rule(for: address) == nil else { continue }
+            let approved = SenderRule(accountID: account.id, key: address, decision: .approved)
+            additions.append(.init(id: address, value: approved))
+            index.insert(approved)
+        }
+        guard !additions.isEmpty else { return }
+        let revision = try await store.save(additions, collection: "senderRules", accountID: account.id)
+        ruleIndexes[account.id] = (revision, index)
     }
 
     private func normalizedRuleKey(sender: String, domain: Bool) throws -> String {
@@ -641,6 +736,55 @@ actor MailService {
             ids.formUnion(page.items.map(\.id)); pageToken = page.nextPageToken
         } while pageToken != nil
         return Array(ids)
+    }
+
+    private func cacheSources(_ ids: [String], account: Account, isSync: Bool) async throws -> [MailThread] {
+        var threads: [MailThread] = []
+        for offset in stride(from: 0, to: ids.count, by: 8) {
+            try Task.checkCancellation()
+            let batch = Array(ids[offset..<min(offset + 8, ids.count)])
+            let fetched = try await serialized(accountID: account.id) {
+                let sources = try await self.fetchSources(batch)
+                var results: [MailThread] = []
+                for source in sources {
+                    let thread = try await self.mapped(source, accountID: account.id)
+                    try await self.save(thread, background: isSync)
+                    results.append(thread)
+                }
+                for missing in Set(batch).subtracting(sources.map(\.id)) {
+                    try await self.store.remove(id: missing, collection: "threads", accountID: account.id)
+                }
+                return results
+            }
+            threads += fetched
+        }
+        return threads
+    }
+
+    private func hydrate(_ source: GoogleMailThread) async throws -> GoogleMailThread {
+        var thread = source
+        var messages: [GoogleMailMessage] = []
+        for var message in source.messages ?? [] {
+            if let payload = message.payload { message.payload = try await hydrate(payload, messageID: message.id) }
+            messages.append(message)
+        }
+        thread.messages = messages
+        return thread
+    }
+
+    private func hydrate(_ source: GoogleMailPart, messageID: String) async throws -> GoogleMailPart {
+        var part = source
+        if ["text/plain", "text/html"].contains(part.mimeType ?? ""), (part.filename ?? "").isEmpty,
+           part.body?.data == nil, let id = part.body?.attachmentId {
+            part.body?.data = try await api.attachment(messageID: messageID, attachmentID: id).base64URL
+            part.body?.attachmentId = nil
+        }
+        if let children = part.parts {
+            var hydrated: [GoogleMailPart] = []
+            for child in children { hydrated.append(try await hydrate(child, messageID: messageID)) }
+            part.parts = hydrated
+        }
+        return part
     }
 
     private func fetchSources(_ ids: [String]) async throws -> [GoogleMailThread] {

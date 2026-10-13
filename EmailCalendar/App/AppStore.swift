@@ -8,22 +8,29 @@ import UserNotifications
 final class AppStore {
     var account: Account?
     var threads: [MailThread] = []
-    var senderRules: [SenderRule] = []
+    var senderRules: [SenderRule] = [] { didSet { senderRuleIndex = SenderRuleIndex(senderRules) } }
     var remoteImageSenders: Set<String> = []
     var calendars: [CalendarRecord] = []
     var events: [CalendarEvent] = []
-    var navigation: Mailbox = .imbox
+    var navigation: Mailbox = .imbox {
+        didSet { if navigation != oldValue { poweringThrough = false } }
+    }
     var selectedThreadID: String?
     /// The thread shown as a full page; nil shows the mailbox list.
     var openThreadID: String?
     /// "Power Through New": new Imbox mail as one scrolling stack of cards, instead of the list.
     var poweringThrough = false
     /// Set to ask the mail view to open a blank composer (from menus outside it).
-    var composeRequest: UUID?
-    var isComposing = false
+    var composeRequest: UUID? {
+        didSet { if composeRequest != nil && navigation == .calendar { navigation = .imbox } }
+    }
+    var composition: MailComposition?
+    var isComposing: Bool { composition != nil && navigation != .calendar }
     var selectedEventID: String?
     var searchQuery = ""
     var isRefreshing = false
+    var isSearching = false
+    var searchNextPageToken: String?
     var isSigningIn = false
     var errorMessage: String?
     var undoMessage: String?
@@ -56,12 +63,19 @@ final class AppStore {
     @ObservationIgnored private let calendarService: CalendarService?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private var hasStarted = false
+    @ObservationIgnored private var isResettingDemo = false
     @ObservationIgnored private var undoTask: Task<Void, Never>?
     @ObservationIgnored private var undoID: UUID?
-    @ObservationIgnored private var cachedThreads: [MailThread] = []
+    private var cachedThreads: [MailThread] = []
+    @ObservationIgnored private var replacingComposition = false
+    @ObservationIgnored private var mailSnapshotOrder = MailSnapshotOrder()
+    private var senderRuleIndex = SenderRuleIndex()
     @ObservationIgnored private var searchGeneration = 0
+    @ObservationIgnored private var searchTask: Task<MailSearchPage, Error>?
     @ObservationIgnored var openWindow: (() -> Void)?
     @ObservationIgnored var showOverlay: (() -> Void)?
+    /// Quick alarms set from the overlay; they ring app-wide.
+    @ObservationIgnored let alarms = AlarmCenter()
 
     init() {
         auth = GoogleAuth()
@@ -120,15 +134,31 @@ final class AppStore {
 
     /// Demo mode: start over with fresh seed data, relative to today.
     func resetDemoData() {
-        guard isDemoMode else { return }
+        guard isDemoMode, !isResettingDemo else { return }
+        isResettingDemo = true
+        let previousAccount = account
+        account = nil
+        composition?.session.cancel()
         UserDefaults.standard.set(true, forKey: "resetDemoDataOnLaunch")
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
         let bundle = Bundle.main.bundleURL
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NSWorkspace.shared.openApplication(at: bundle, configuration: configuration)
+        Task {
+            defer { isResettingDemo = false }
+            await mail?.cancelAllOperations()
+            await calendarService?.cancelAllOperations()
+            do {
+                try await ApplicationRestart.perform(launch: {
+                    _ = try await NSWorkspace.shared.openApplication(at: bundle, configuration: configuration)
+                }, terminate: { NSApp.terminate(nil) })
+            } catch {
+                UserDefaults.standard.removeObject(forKey: "resetDemoDataOnLaunch")
+                account = previousAccount
+                composition?.session.resume()
+                await loadCache()
+                reportError(error)
+            }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { NSApp.terminate(nil) }
     }
 
     func start() async {
@@ -176,8 +206,10 @@ final class AppStore {
         isSigningIn = true
         defer { isSigningIn = false }
         // Stop new UI and polling work before draining operations tied to these credentials.
+        composition?.session.cancel(); composition = nil
         account = nil; threads = []; cachedThreads = []; senderRules = []; remoteImageSenders = []
         calendars = []; events = []; selectedThreadID = nil; selectedEventID = nil; openThreadID = nil; poweringThrough = false
+        searchTask?.cancel(); searchTask = nil; searchGeneration += 1; searchNextPageToken = nil; isSearching = false
         searchQuery = ""; undoMessage = nil; undoID = nil; undoTask?.cancel()
         await mail?.cancelAllOperations()
         await calendarService?.cancelAllOperations()
@@ -196,7 +228,10 @@ final class AppStore {
         isRefreshing = true
         defer { isRefreshing = false }
         // Independent services let the calendar appear while sent-history seeding is still running.
-        let mailTask = Task { try await mail.sync(account: account) }
+        let progress: @Sendable (MailSnapshot) async -> Void = { [weak self] snapshot in
+            await self?.publishMailProgress(snapshot, accountID: account.id)
+        }
+        let mailTask = Task { try await mail.sync(account: account, progress: progress) }
         let calendarTask = Task { try await calendarService.sync(accountID: account.id) }
         do {
             try await calendarTask.value
@@ -224,19 +259,79 @@ final class AppStore {
         } catch { reportError(error) }
     }
 
+    private func publishMailProgress(_ snapshot: MailSnapshot, accountID: String) {
+        if account?.id == accountID { apply(snapshot) }
+    }
+
     func search(_ query: String) async {
         searchGeneration += 1
         let generation = searchGeneration
+        searchTask?.cancel(); searchTask = nil
+        searchNextPageToken = nil; isSearching = false
         searchQuery = query
         if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            threads = cachedThreads; return
+            searchQuery = ""; threads = cachedThreads; return
         }
         guard let account, let mail else { return }
         do {
-            let result = try await mail.search(query: query, account: account)
+            isSearching = true
+            defer { if generation == searchGeneration { isSearching = false; searchTask = nil } }
+            let task = Task { try await mail.searchPage(query: query, account: account) }
+            searchTask = task
+            let result = try await task.value
             guard generation == searchGeneration, self.account?.id == account.id else { return }
-            threads = result
-        } catch { reportError(error) }
+            threads = acceptSearchPage(result, accountID: account.id); searchNextPageToken = result.nextPageToken
+        } catch { if generation == searchGeneration { reportError(error) } }
+    }
+
+    func loadMoreSearch() async {
+        guard !isSearching, let token = searchNextPageToken, let mail, let account else { return }
+        let generation = searchGeneration, query = searchQuery
+        isSearching = true
+        defer { if generation == searchGeneration { isSearching = false; searchTask = nil } }
+        do {
+            let task = Task { try await mail.searchPage(query: query, pageToken: token, account: account) }
+            searchTask = task
+            let page = try await task.value
+            guard generation == searchGeneration, self.account?.id == account.id else { return }
+            let existing = Set(threads.map(\.id))
+            threads += acceptSearchPage(page, accountID: account.id).filter { !existing.contains($0.id) }
+            searchNextPageToken = page.nextPageToken
+        } catch { if generation == searchGeneration { reportError(error) } }
+    }
+
+    func fullMessage(_ message: MailMessage) async throws -> MailMessage {
+        guard message.needsBodyHydration else { return message }
+        guard let mail, let account else { throw AppError.signInRequired }
+        guard account.id == message.accountID else { throw CancellationError() }
+        let thread = try await mail.fetchThread(id: message.threadID, account: account)
+        try await loadMailCache(accountID: account.id)
+        guard let hydrated = thread.messages.first(where: { $0.id == message.id }) else {
+            throw AppError.messageNoLongerAvailable
+        }
+        return hydrated
+    }
+
+    /// Search membership can change while reading a thread; the open page still follows its cache.
+    var openThread: MailThread? {
+        guard let openThreadID else { return nil }
+        return threads.first { $0.id == openThreadID } ?? cachedThreads.first { $0.id == openThreadID }
+    }
+
+    func replaceComposition(with next: MailComposition) {
+        guard !replacingComposition, composition?.session.isSending != true else { return }
+        let previous = composition, accountID = account?.id
+        replacingComposition = true
+        Task {
+            defer { replacingComposition = false }
+            do {
+                try await previous?.session.flush()
+                guard account?.id == accountID, composition?.id == previous?.id,
+                      previous?.session.isSending != true else { return }
+                previous?.session.cancel()
+                composition = next
+            } catch { reportError(error) }
+        }
     }
 
     func visibleThreads(mailbox: Mailbox) -> [MailThread] {
@@ -269,7 +364,12 @@ final class AppStore {
     func open(_ thread: MailThread) {
         selectedThreadID = thread.id
         openThreadID = thread.id
-        if thread.unread { Task { await setRead(thread, true) } }
+        Task {
+            if let message = thread.messages.first(where: \.needsBodyHydration) {
+                do { _ = try await fullMessage(message) } catch { reportError(error) }
+            }
+            if thread.unread { await setRead(thread, true) }
+        }
     }
 
     /// Back to the page under the thread: the mailbox list, or the Power Through stack.
@@ -313,9 +413,7 @@ final class AppStore {
     func decision(for sender: String) -> ScreeningDecision? {
         let address = sender.lowercased()
         if address == accountEmail.lowercased() { return .approved }
-        if let exact = senderRules.first(where: { !$0.isDomain && $0.key == address }) { return exact.decision }
-        guard let domain = address.split(separator: "@").last else { return nil }
-        return senderRules.first { $0.key == "@\(domain)" }?.decision
+        return senderRuleIndex.rule(for: address)?.decision
     }
 
     func archive(_ thread: MailThread) async {
@@ -331,7 +429,6 @@ final class AppStore {
         do {
             _ = try await mail.markUnread(threadID: thread.id, unread: !read, account: account)
             if self.account?.id == account.id { try await loadMailCache(accountID: account.id) }
-            if self.account?.id == account.id && !searchQuery.isEmpty { await search(searchQuery) }
         } catch { reportError(error) }
     }
     func toggleSetAside(_ thread: MailThread) async {
@@ -353,7 +450,6 @@ final class AppStore {
             try await mail.undo(tokenID: undoID, account: account)
             self.undoID = nil; undoMessage = nil; undoTask?.cancel()
             try await loadMailCache(accountID: account.id)
-            if self.account?.id == account.id && !searchQuery.isEmpty { await search(searchQuery) }
         } catch { reportError(error) }
     }
     func saveDraft(_ outgoing: OutgoingMessage) async throws -> OutgoingMessage {
@@ -386,16 +482,21 @@ final class AppStore {
     }
 
     @discardableResult
-    func saveEvent(_ event: CalendarEvent, scope: EventEditScope = .thisEvent, originalCalendarID: String? = nil) async -> Bool {
+    func saveEvent(_ event: CalendarEvent, scope: EventEditScope = .thisEvent, originalCalendarID: String? = nil, originalEvent: CalendarEvent? = nil, creationID: UUID? = nil,
+                   recoverMovedEdit: ((CalendarEvent) -> Void)? = nil) async -> Bool {
         guard let calendarService, account?.id == event.accountID else { return false }
         do {
-            if event.id.isEmpty { _ = try await calendarService.create(event) }
+            if event.id.isEmpty { _ = try await calendarService.create(event, requestID: creationID) }
             else {
                 let oldCalendar = originalCalendarID ?? events.first { $0.cacheID == event.cacheID }?.calendarID
-                _ = try await calendarService.update(event, originalCalendarID: oldCalendar, scope: scope)
+                _ = try await calendarService.update(event, originalCalendarID: oldCalendar, scope: scope, originalEvent: originalEvent)
             }
             await reloadCalendarAfterWrite(accountID: event.accountID)
             return true
+        } catch let error as CalendarMoveIncompleteError {
+            recoverMovedEdit?(error.pendingEvent)
+            try? await loadCalendarCache(accountID: event.accountID)
+            reportError(error); return false
         } catch let error as CalendarWriteCommittedError {
             try? await loadCalendarCache(accountID: event.accountID)
             reportError(error); return true
@@ -432,6 +533,12 @@ final class AppStore {
         return await saveEvent(CalendarEvent(id: "", calendarID: calendar.id, accountID: calendar.accountID,
                                             title: title, start: start, end: start.addingTimeInterval(1800)))
     }
+    /// Saves an event found by AI add: on the calendar it names (or the primary one), repeating if it repeats.
+    func quickAdd(_ found: ExtractedEvent) async -> Bool {
+        let named = found.calendar.flatMap { name in calendars.first { $0.canEdit && $0.title == name } }
+        guard let calendar = named ?? calendars.first(where: { $0.isPrimary && $0.canEdit }) ?? calendars.first(where: \.canEdit) else { return false }
+        return await saveEvent(found.calendarEvent(in: calendar), creationID: found.id)
+    }
     func openMainWindow(event: CalendarEvent? = nil) {
         if let event { navigation = .calendar; selectedEventID = event.cacheID }
         openWindow?()
@@ -458,10 +565,10 @@ final class AppStore {
                 self?.undoMessage = nil; self?.undoID = nil
             }
             try await loadMailCache(accountID: account.id)
-            if self.account?.id == account.id && !searchQuery.isEmpty { await search(searchQuery) }
         } catch { reportError(error) }
     }
     private func apply(_ snapshot: MailSnapshot) {
+        guard let account, mailSnapshotOrder.accept(revision: snapshot.revision, accountID: account.id) else { return }
         cachedThreads = snapshot.threads
         if searchQuery.isEmpty { threads = snapshot.threads }
         else {
@@ -469,6 +576,15 @@ final class AppStore {
             threads = threads.compactMap { updated[$0.id] }
         }
         senderRules = snapshot.rules; remoteImageSenders = snapshot.remoteImageSenders
+    }
+
+    private func acceptSearchPage(_ page: MailSearchPage, accountID: String) -> [MailThread] {
+        var latest = Dictionary(cachedThreads.map { ($0.id, $0) }, uniquingKeysWith: { _, newest in newest })
+        if mailSnapshotOrder.accept(revision: page.revision, accountID: accountID) {
+            for thread in page.threads { latest[thread.id] = thread }
+            cachedThreads = Array(latest.values)
+        }
+        return page.threads.compactMap { latest[$0.id] }
     }
     private func loadCache() async {
         guard let account else { return }
@@ -480,8 +596,18 @@ final class AppStore {
     private func loadMailCache(accountID: String) async throws {
         guard account?.id == accountID else { return }
         if let mail {
+            let before = Dictionary(threads.map { ($0.id, $0.labels) }, uniquingKeysWith: { _, latest in latest })
             let snapshot = try await mail.cached(accountID: accountID)
             if account?.id == accountID { apply(snapshot) }
+            let query = searchQuery, generation = searchGeneration
+            if !query.isEmpty, let account, account.id == accountID {
+                let changed = threads.filter { before[$0.id] != $0.labels }
+                for thread in changed {
+                    let matches = try await mail.matchesSearch(thread, query: query, account: account)
+                    guard generation == searchGeneration, self.account?.id == accountID else { return }
+                    if !matches { threads.removeAll { $0.id == thread.id } }
+                }
+            }
         }
     }
     private func loadCalendarCache(accountID: String) async throws {
@@ -519,7 +645,12 @@ final class AppStore {
 }
 
 enum AppError: LocalizedError {
-    case signInRequired
-    var errorDescription: String? { "Sign in with Google to continue." }
+    case signInRequired, messageNoLongerAvailable
+    var errorDescription: String? {
+        switch self {
+        case .signInRequired: "Sign in with Google to continue."
+        case .messageNoLongerAvailable: "This message is no longer available. Reopen the thread before composing a reply or draft."
+        }
+    }
 }
 #endif

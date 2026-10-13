@@ -11,6 +11,6 @@ let package = Package(
         .target(name: "EmailCalendarCore", dependencies: ["CSQLite"], path: "EmailCalendar",
                 exclude: ["App", "Auth", "UI", "Overlay", "Resources"],
                 sources: ["Models", "Data", "Services", "Google"]),
-        .testTarget(name: "EmailCalendarCoreTests", dependencies: ["EmailCalendarCore"], path: "Tests")
+        .testTarget(name: "EmailCalendarCoreTests", dependencies: ["EmailCalendarCore"], path: "Tests", exclude: ["Fixtures"])
     ]
 )

@@ -2,23 +2,37 @@
 import AppKit
 import SwiftUI
 
-/// Mail is a list page or one thread as a full page. Sheets and keys for both live here.
+/// Mail is a list page, the Power Through stack, or one thread as a full page. Sheets and keys for all live here.
 struct MailRootView: View {
     @Environment(AppStore.self) private var store
     var searchFocus: () -> Void
-    @State private var composition: MailComposition?
+    private var composition: MailComposition? {
+        get { store.composition }
+        nonmutating set {
+            if let newValue { store.replaceComposition(with: newValue) }
+            else { store.composition = nil }
+        }
+    }
     @State private var bubbleThread: MailThread?
     @State private var showsScreenedSenders = false
     @State private var showsPalette = false
     @State private var showsMore = false
     @State private var pendingCommand: MailPaletteCommand?
     @State private var loadingComposition = false
+    @State private var powerFocusID: String?
+    @State private var powerScrollRequest: String?
 
     private var mailbox: Mailbox { store.navigation }
     private var threads: [MailThread] { store.visibleThreads(mailbox: mailbox) }
-    private var openThread: MailThread? { store.threads.first { $0.id == store.openThreadID } }
-    /// The list row the keyboard points at, or the open thread.
-    private var focused: MailThread? { openThread ?? threads.first { $0.id == store.selectedThreadID } }
+    private var openThread: MailThread? { store.openThread }
+    private var isPowerStack: Bool { store.poweringThrough && openThread == nil }
+    private var powerThreads: [MailThread] { store.newForYou }
+    /// The list row the keyboard points at, the Power Through card in view, or the open thread.
+    private var focused: MailThread? {
+        if let openThread { return openThread }
+        if isPowerStack { return powerThreads.first { $0.id == powerFocusID } ?? powerThreads.first }
+        return threads.first { $0.id == store.selectedThreadID }
+    }
     private func replyMessage(_ thread: MailThread?) -> MailMessage? {
         thread?.messages.filter { !$0.labels.contains("DRAFT") && $0.draftID == nil }.max { $0.date < $1.date }
     }
@@ -29,12 +43,17 @@ struct MailRootView: View {
     var body: some View {
         Group {
             if let composition {
-                MailComposerView(composition: composition) { self.composition = nil }
+                MailComposerView(composition: composition) {
+                    if self.composition?.id == composition.id { self.composition = nil }
+                }
                     .id(composition.id)
             } else if let openThread {
                 MailThreadView(thread: openThread, compose: compose, bubble: { bubbleThread = openThread },
                                act: { action in perform(action, on: openThread) }, showsMore: $showsMore)
                     .id(openThread.id)
+            } else if store.poweringThrough {
+                PowerThroughPage(threads: powerThreads, focusedID: $powerFocusID, scrollRequest: $powerScrollRequest,
+                                 compose: compose, bubble: { bubbleThread = $0 }, act: { thread, action in perform(action, on: thread) })
             } else {
                 MailboxPage(mailbox: mailbox, threads: threads, compose: { composition = .newMessage },
                             bubble: { bubbleThread = $0 }, showsScreenedSenders: $showsScreenedSenders)
@@ -74,8 +93,7 @@ struct MailRootView: View {
         }) {
             MailCommandPalette(commands: commands) { pendingCommand = $0 }.environment(store)
         }
-        .onChange(of: composition?.id) { _, id in store.isComposing = id != nil }
-        .onChange(of: store.composeRequest) { _, request in
+        .onChange(of: store.composeRequest, initial: true) { _, request in
             if request != nil { composition = .newMessage; store.composeRequest = nil }
         }
         .onChange(of: threads.map(\.id)) { oldIDs, newIDs in
@@ -85,7 +103,7 @@ struct MailRootView: View {
         }
     }
 
-    enum ThreadAction { case archive, setAside, trash, toggleRead }
+    enum ThreadAction { case archive, setAside, trash, toggleRead, seen }
 
     private func perform(_ action: ThreadAction, on thread: MailThread) {
         Task {
@@ -94,6 +112,7 @@ struct MailRootView: View {
             case .setAside: await store.toggleSetAside(thread)
             case .trash: await store.trash(thread)
             case .toggleRead: await store.setRead(thread, thread.unread); return
+            case .seen: await store.setRead(thread, true)
             }
             store.advanceAfterAction(from: thread.id)
         }
@@ -101,26 +120,37 @@ struct MailRootView: View {
 
     private func compose(_ message: MailMessage, _ action: MailComposeAction) {
         guard !loadingComposition else { return }
-        switch action {
-        case .reply: composition = .reply(to: message, accountEmail: store.accountEmail, all: false)
-        case .replyAll: composition = .reply(to: message, accountEmail: store.accountEmail, all: true)
-        case .forward, .editDraft:
-            loadingComposition = true
-            Task {
-                do {
+        loadingComposition = true
+        let accountID = store.account?.id
+        Task {
+            defer { loadingComposition = false }
+            do {
+                let message = try await store.fullMessage(message)
+                guard store.account?.id == accountID, message.accountID == accountID else { return }
+                switch action {
+                case .reply: composition = .reply(to: message, accountEmail: store.accountEmail, all: false)
+                case .replyAll: composition = .reply(to: message, accountEmail: store.accountEmail, all: true)
+                case .forward, .editDraft:
                     var request = action == .forward ? MailComposition.forward(message) : MailComposition.draft(message)
                     for attachment in message.attachments {
                         let data = try await store.attachmentData(attachment, message: message)
                         request.message.attachments.append(OutgoingAttachment(name: attachment.name, mimeType: attachment.mimeType, data: data))
                     }
+                    guard store.account?.id == accountID else { return }
                     composition = request
-                } catch { store.reportError(error) }
-                loadingComposition = false
-            }
+                }
+            } catch { store.reportError(error) }
         }
     }
 
     private func moveSelection(_ offset: Int) {
+        if isPowerStack {
+            guard !powerThreads.isEmpty else { return }
+            let current = powerThreads.firstIndex { $0.id == focused?.id } ?? 0
+            let target = powerThreads[min(max(current + offset, 0), powerThreads.count - 1)].id
+            powerFocusID = target; powerScrollRequest = target
+            return
+        }
         guard !threads.isEmpty else { return }
         let current = threads.firstIndex { $0.id == (store.openThreadID ?? store.selectedThreadID) }
         let target = current.map { min(max($0 + offset, 0), threads.count - 1) } ?? (offset > 0 ? 0 : threads.count - 1)
@@ -135,6 +165,7 @@ struct MailRootView: View {
         guard modifiers.isEmpty else { return false }
         if event.keyCode == 53 {
             if store.openThreadID != nil { store.closeThread(); return true }
+            if store.poweringThrough { store.endPowerThrough(); return true }
             if mailbox != .imbox { store.navigation = .imbox; return true }
             return false
         }
@@ -144,17 +175,19 @@ struct MailRootView: View {
         case "c": composition = .newMessage
         case "/": searchFocus()
         case "\r", "o":
-            if store.openThreadID == nil {
+            if isPowerStack { if let focused { store.open(focused) } }
+            else if store.openThreadID == nil {
                 if let focused { mailbox == .drafts && draftMessage(focused) != nil ? compose(draftMessage(focused)!, .editDraft) : store.open(focused) }
                 else { moveSelection(1) }
             }
         case "e": if let focused { perform(.archive, on: focused) }
+        case "s" where isPowerStack: if let focused { perform(.seen, on: focused) }
         case "a", "s": if let focused { perform(.setAside, on: focused) }
         case "z", "b": if let focused { bubbleThread = focused }
         case "r": if let message = replyMessage(focused) { compose(message, .reply) }
         case "f": if let message = replyMessage(focused) { compose(message, .forward) }
         case "m": if store.openThreadID != nil { showsMore.toggle() } else { return false }
-        case "p": if store.openThreadID == nil, mailbox == .imbox { store.powerThroughNew() } else { return false }
+        case "p": if store.openThreadID == nil, mailbox == .imbox, !store.poweringThrough { store.powerThroughNew() } else { return false }
         default: return false
         }
         return true
@@ -188,6 +221,10 @@ struct MailRootView: View {
             }
             if let message = draftMessage(selected) { result.append(MailPaletteCommand(title: "Edit draft", symbol: "square.and.pencil", shortcut: "↩") { compose(message, .editDraft) }) }
         }
+        if isPowerStack, !powerThreads.isEmpty {
+            let stack = powerThreads
+            result.append(MailPaletteCommand(title: "Mark all as seen", symbol: "eye", shortcut: "") { Task { await store.markAllSeen(stack) } })
+        }
         if store.undoMessage != nil { result.append(MailPaletteCommand(title: "Undo last action", symbol: "arrow.uturn.backward", shortcut: "⌘Z") { Task { await store.undo() } }) }
         return result
     }
@@ -213,6 +250,13 @@ private struct MailboxPage: View {
                 VStack(spacing: 0) {
                     header.padding(.top, 28).padding(.bottom, 18)
                     content
+                    if isSearch {
+                        if store.isSearching { ProgressView("Searching…").padding() }
+                        else if store.searchNextPageToken != nil {
+                            Button("Load more results") { Task { await store.loadMoreSearch() } }
+                                .buttonStyle(QuietButtonStyle()).padding()
+                        }
+                    }
                     Spacer(minLength: 110)
                 }
                 .padding(.horizontal, 40)
@@ -277,7 +321,7 @@ private struct MailboxPage: View {
             if !fresh.isEmpty {
                 SectionRule(title: "NEW FOR YOU") {
                     Button { store.powerThroughNew() } label: { Label("Power Through New", systemImage: "bolt.fill") }
-                        .buttonStyle(OutlinePillStyle()).help("Open new mail one after another (p)")
+                        .buttonStyle(OutlinePillStyle()).help("Read all new mail on one page (p)")
                 }
                 rows(fresh)
             }
