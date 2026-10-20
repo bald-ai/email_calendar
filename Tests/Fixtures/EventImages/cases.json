@@ -18,7 +18,7 @@
     {"tier": 1, "id": "web_deploy_overnight", "image": "web_deploy_overnight.png", "expect": [{"start": ["2026-10-31T23:00"], "end": "2026-11-01T02:00"}]},
     {"tier": 1, "id": "web_restaurant_booking", "image": "web_restaurant_booking.png", "expect": [{"start": ["2026-10-17T19:00"]}]},
     {"tier": 1, "id": "email_no_event", "image": "email_no_event.png", "expect": []},
-    {"tier": 1, "id": "text_lunch", "text": "lunch with Petra thursday 12:30 at Café Savoy", "expect": [{"start": ["2026-10-15T12:30"]}]},
+    {"tier": 1, "id": "text_lunch", "text": "lunch with Tom thursday 12:30 at Café Savoy", "expect": [{"start": ["2026-10-15T12:30"]}]},
     {"tier": 1, "id": "text_relative", "text": "call mom in 2 days at 7pm", "expect": [{"start": ["2026-10-14T19:00"]}]},
     {"tier": 1, "id": "text_czech_date", "text": "zubař 3.11. v 8:15", "expect": [{"start": ["2026-11-03T08:15"]}]},
     {"tier": 1, "id": "text_iso", "text": "Board meeting 2026-11-12 09:00-10:30", "expect": [{"start": ["2026-11-12T09:00"], "end": "2026-11-12T10:30"}]},

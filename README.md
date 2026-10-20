@@ -1,6 +1,14 @@
 # Email + Calendar
 
+> **Status: in progress.** A personal project I use daily. Demo mode runs without a Google account.
+
 A native macOS 15+ app written in Swift 6, SwiftUI and AppKit. Mail is backed by Gmail, calendars by Google Calendar, and the local cache by SQLite. The week overlay opens from cached data with **⌘F3**: tap to toggle, hold to peek. It scrolls smoothly through days, and switches between a week timeline and a month view.
+
+**Highlights**
+
+- **AI event extraction:** paste a screenshot or a sentence, and the app proposes calendar events with warnings for anything doubtful. Time-zone and weekday checks are done in code, not by the model. [Details and benchmark ↓](#ai-event-extraction-and-benchmark)
+- **46-case tiered benchmark** for that feature: simple → context → traps → app controls, run against several models for accuracy, latency and cost.
+- **Demo mode:** the real mail and calendar code runs against a fake Gmail and Google Calendar, so you can try everything without signing in.
 
 ## Run on your Mac (demo data, no Google account)
 
@@ -77,13 +85,36 @@ swift test --parallel
 
 Tests use temporary databases and mock URLSession transports; they do not touch your Google account.
 
-AI add has a tiered live benchmark, skipped by default. It sends the 46 cases in `Tests/Fixtures/EventImages` (fictional screenshots of emails, event pages, chats, tickets and posters, plus typed text, regenerated with `python3 scripts/make_event_fixtures.py`) and compares the results with `cases.json`. Tier 1 is simple, tier 2 needs context (relative dates, durations, time zones, several events), tier 3 is traps (changed plans, cancellations, wrong weekdays, ambiguity that must be flagged), tier 4 is app controls (repeat rules, a named calendar, reminders). Models named `claude-…` use the Anthropic API (`ANTHROPIC_API_KEY`, plus `ANTHROPIC_WORKSPACE_ID` for keys not scoped to a workspace):
+## AI event extraction and benchmark
+
+**What it does:** in the overlay, press `I` or paste a screenshot. The model proposes events (date, time, length, repeat rule, calendar, reminder), and the app shows them as editable cards. Anything doubtful gets a warning instead of a silent guess: a changed plan, an ambiguous date, an unconfirmed time zone, a likely duplicate. Time-zone conversion, weekday checks and clock-change nights are handled in code; the model only reports what the source says.
+
+**Results** (12 October 2026, 38 cases in tiers 1–3, each run 3 times = 114 answers per setup; selected rows):
+
+| Model · reasoning | Simple | Context | Traps | Overall | Median | $ / 1000 events |
+| --- | --- | --- | --- | --- | --- | --- |
+| Haiku 5.5 · high | 100% | 100% | 100% | 114/114 | 3.4 s | $0.53 |
+| Sol 6.1 · medium | 100% | 100% | 100% | 114/114 | 4.3 s | $4.78 |
+| Luna 6 · low | 100% | 100% | 100% | 114/114 | 2.7 s | $0.26 |
+| Haiku 5.5 · medium | 100% | 100% | 94% | 112/114 | 3.1 s | $0.48 |
+| Luna 6 · none | 100% | 100% | 88% | 110/114 | 2.1 s | $0.23 |
+
+- Every setup passed the simple and context tiers; the traps tier is what separates them.
+- The dangerous misses were wrong dates or times with no warning: a meeting moved "to 4:30 the same day" put on today instead of Thursday, and a UTC invite read as Prague time.
+- Haiku 5.5 high and Sol 6.1 made no mistakes across all rounds. Haiku is about 9× cheaper and faster, so it is the default, with Sol as the automatic backup.
+- After adding tier 4 (app controls, 8 cases), both scored 100% on it.
+
+Small samples: a perfect score over 114 answers does not prove a model never errs. Costs are estimates from published prices.
+
+**Running it:** the live benchmark is skipped by default. It sends the 46 cases in `Tests/Fixtures/EventImages` (fictional screenshots of emails, event pages, chats, tickets and posters, plus typed text, regenerated with `python3 scripts/make_event_fixtures.py`) and compares the results with `cases.json`. Tier 1 is simple, tier 2 needs context (relative dates, durations, time zones, several events), tier 3 is traps (changed plans, cancellations, wrong weekdays, ambiguity that must be flagged), tier 4 is app controls (repeat rules, a named calendar, reminders). Models named `claude-…` use the Anthropic API (`ANTHROPIC_API_KEY`, plus `ANTHROPIC_WORKSPACE_ID` for keys not scoped to a workspace):
 
 ```sh
 EC_LIVE_AI=1 OPENAI_API_KEY=sk-… EC_AI_MODEL=gpt-6.1-sol EC_AI_REASONING=medium EC_AI_REPEATS=3 \
   EC_AI_JSON=results/gpt-6.1-sol-medium.json swift test --filter LiveEventExtraction
 python3 scripts/summarize_event_benchmark.py results
-``` The Xcode project is checked in. After adding Swift source files, regenerate it with `python3 scripts/generate_project.py`.
+```
+
+The Xcode project is checked in. After adding Swift source files, regenerate it with `python3 scripts/generate_project.py`.
 
 Validated on macOS with Xcode: the app compiles and **all tests pass**, covering SQLite isolation/rollback, OAuth-token retry, MIME/attachments, history and sync-token recovery, sender/filter undo, account-switch cancellation, Bubble Up, drafts/sending, recurrence, invitations and confirmed-write recovery. All 29 app source files passed parsing for the macOS 15 target, and the project references, scheme and resource plists parsed successfully. Native SDK compilation is covered by the added macOS CI workflow but has not run here.
 

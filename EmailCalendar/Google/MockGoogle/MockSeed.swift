@@ -164,7 +164,7 @@ enum MockSeed {
         let family = "family@group.calendar.google.com"
         let workTitles = ["Design crit", "Sprint planning", "1:1 with Maya", "Customer call", "Code review", "Hiring panel",
                           "Roadmap review", "Retro", "Pairing with Sam", "Vendor call", "Bug triage", "Interview"]
-        let personalTitles = ["Run", "Groceries", "Haircut", "Coffee with Tom", "Therapy", "Call Mom", "Yoga", "Swim"]
+        let personalTitles = ["Run", "Groceries", "Haircut", "Coffee with Tom", "Bike repair", "Call Mom", "Yoga", "Swim"]
         let familyTitles = ["Dinner at Mom's", "Birthday party", "Movie night", "Brunch"]
         var seed: UInt64 = 0x9E3779B97F4A7C15
         func next(_ bound: Int) -> Int {
