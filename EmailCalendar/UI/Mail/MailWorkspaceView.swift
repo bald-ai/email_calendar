@@ -103,7 +103,7 @@ struct MailRootView: View {
         }
     }
 
-    enum ThreadAction { case archive, setAside, trash, toggleRead, seen, moveToTodo, link }
+    enum ThreadAction { case archive, setAside, trash, spam, notSpam, toggleRead, seen, moveToTodo, link }
 
     private func perform(_ action: ThreadAction, on thread: MailThread) {
         Task {
@@ -111,6 +111,8 @@ struct MailRootView: View {
             case .archive: await store.archive(thread)
             case .setAside: await store.toggleSetAside(thread)
             case .trash: await store.trash(thread)
+            case .spam: await store.moveToSpam(thread)
+            case .notSpam: await store.notSpam(thread)
             case .toggleRead: await store.setRead(thread, thread.unread); return
             case .seen: await store.setRead(thread, true)
             case .moveToTodo: await store.moveToTodo(thread); return
@@ -224,6 +226,10 @@ struct MailRootView: View {
             result += [
                 MailPaletteCommand(title: "Archive thread", symbol: "archivebox", shortcut: "e") { perform(.archive, on: selected) },
                 MailPaletteCommand(title: "Move thread to Trash", symbol: "trash", shortcut: "") { perform(.trash, on: selected) },
+                MailPaletteCommand(title: selected.hasSpam ? "Not spam" : "Move thread to Spam",
+                                   symbol: selected.hasSpam ? "checkmark.shield" : Mailbox.spam.symbol, shortcut: "") {
+                    perform(selected.hasSpam ? .notSpam : .spam, on: selected)
+                },
                 MailPaletteCommand(title: selected.isSetAside ? "Return thread to Imbox" : "Set thread aside", symbol: "pin", shortcut: "a") { perform(.setAside, on: selected) },
                 MailPaletteCommand(title: "Bubble Up thread", symbol: "bubbles.and.sparkles", shortcut: "z") { bubbleThread = selected },
                 MailPaletteCommand(title: "Move to To-do", symbol: "checklist", shortcut: "t") { perform(.moveToTodo, on: selected) },
@@ -316,6 +322,7 @@ private struct MailboxPage: View {
         case .setAside: "Everything you’ve marked as Set Aside."
         case .bubbleUp: "Mail that will bubble back up to the top of your Imbox."
         case .screenedOut: "Mail from senders you said no to. They never reach your Imbox."
+        case .spam: "Mail Gmail thinks is spam. Gmail deletes it after 30 days."
         case .sent: "Everything you’ve sent."
         case .drafts: "Emails you started but haven’t sent yet."
         case .allMail: "Every email, in one place."
@@ -360,6 +367,7 @@ private struct MailboxPage: View {
         case .bubbleUp: return "Nothing scheduled. Press z on an email to bring it back later."
         case .drafts: return "No drafts."
         case .screenedOut: return "Nobody screened out yet."
+        case .spam: return "No spam."
         default: return "Nothing here."
         }
     }
@@ -380,6 +388,8 @@ private struct MailboxPage: View {
                         Button(thread.isSetAside ? "Return to Imbox" : "Set Aside") { Task { await store.toggleSetAside(thread) } }
                         Button("Bubble Up…") { bubble(thread) }
                         Divider()
+                        if thread.hasSpam { Button("Not Spam") { Task { await store.notSpam(thread) } } }
+                        else { Button("Move to Spam") { Task { await store.moveToSpam(thread) } } }
                         Button("Move to Trash", role: .destructive) { Task { await store.trash(thread) } }
                     }
             }

@@ -69,6 +69,7 @@ struct MockEvent: Codable {
 struct MockQuery {
     private var clauses: [(negated: Bool, key: String?, value: String)] = []
     private(set) var includesTrash = false
+    private(set) var includesSpam = false
 
     init(_ query: String) {
         var tokens: [String] = [], current = "", depth = 0, quoted = false
@@ -87,6 +88,7 @@ struct MockQuery {
             if let colon = token.firstIndex(of: ":"), token[..<colon].allSatisfy(\.isLetter) {
                 let key = token[..<colon].lowercased(), value = String(token[token.index(after: colon)...]).lowercased()
                 if key == "in" && (value == "trash" || value == "anywhere") { includesTrash = true }
+                if key == "in" && (value == "spam" || value == "anywhere") { includesSpam = true }
                 clauses.append((negated, key, value))
             } else {
                 clauses.append((negated, nil, token.lowercased()))

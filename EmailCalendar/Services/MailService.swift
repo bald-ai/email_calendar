@@ -155,25 +155,34 @@ actor MailService {
         try await searchPage(query: query, account: account).threads
     }
 
-    func searchPage(query: String, pageToken: String? = nil, account: Account) async throws -> MailSearchPage {
+    /// `includeSpamTrash` searches inside Spam, which Gmail search otherwise leaves out.
+    func searchPage(query: String, pageToken: String? = nil, includeSpamTrash: Bool = false, account: Account) async throws -> MailSearchPage {
         try await tracked {
             try await self.serialized(accountID: account.id) { try await self.prepare(account: account) }
-            let page = try await self.api.listThreads(query: query, pageToken: pageToken, maxResults: 50)
+            let page = try await self.api.listThreads(query: query, pageToken: pageToken, maxResults: 50, includeSpamTrash: includeSpamTrash)
             let threads = try await self.cacheSources(page.items.map(\.id), account: account, isSync: false)
             return try await self.store.mailSearchPage(threadIDs: threads.map(\.id), nextPageToken: page.nextPageToken, accountID: account.id)
         }
     }
 
     /// Recheck only the changed result, using its RFC message IDs to bound the server query.
-    func matchesSearch(_ thread: MailThread, query: String, account: Account) async throws -> Bool {
+    func matchesSearch(_ thread: MailThread, query: String, includeSpamTrash: Bool = false, account: Account) async throws -> Bool {
         let ids = thread.messages.compactMap(\.rfcMessageID).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "<>")) }
             .filter { !$0.isEmpty && !$0.contains(where: \.isWhitespace) }
         guard !ids.isEmpty else { return true }
         let scoped = "(\(query)) {" + ids.map { "rfc822msgid:" + $0 }.joined(separator: " ") + "}"
-        return try await tracked { try await self.api.listThreads(query: scoped, maxResults: 1).items.contains { $0.id == thread.id } }
+        return try await tracked {
+            try await self.api.listThreads(query: scoped, maxResults: 1, includeSpamTrash: includeSpamTrash).items.contains { $0.id == thread.id }
+        }
     }
     func fetchThread(id: String, account: Account) async throws -> MailThread {
         try await serialized(accountID: account.id) { try await self.fetchThreadImpl(id: id, account: account) }
+    }
+    func moveToSpam(threadID: String, account: Account) async throws -> MailUndoToken {
+        try await serialized(accountID: account.id) { try await self.moveToSpamImpl(threadID: threadID, account: account) }
+    }
+    func notSpam(threadID: String, account: Account) async throws -> MailUndoToken {
+        try await serialized(accountID: account.id) { try await self.notSpamImpl(threadID: threadID, account: account) }
     }
     func archive(threadID: String, account: Account) async throws -> MailUndoToken {
         try await serialized(accountID: account.id) { try await self.archiveImpl(threadID: threadID, account: account) }
@@ -283,6 +292,8 @@ actor MailService {
         for label in ["INBOX", "DRAFT"] + Self.specialLabels {
             ids.formUnion(try await threadIDs(labelIDs: [try labelID(label, accountID: account.id)]))
         }
+        // Gmail deletes spam after 30 days, so the whole folder stays small enough to cache.
+        ids.formUnion(try await threadIDs(labelIDs: ["SPAM"], includeSpamTrash: true))
         ids.formUnion(try await store.all(MailLink.self, collection: PlannerService.linkCollection, accountID: account.id).map(\.threadID))
         let sources = try await cacheSources(Array(ids), account: account, isSync: true)
         let present = Set(sources.map(\.id))
@@ -389,8 +400,8 @@ actor MailService {
     }
 
     private nonisolated func screeningChange(_ thread: MailThread, rules: SenderRuleIndex, account: Account) -> (adding: Set<String>, removing: Set<String>)? {
-        guard !thread.labels.contains("TRASH"), !thread.labels.contains("SPAM"),
-              let incoming = thread.messages.reversed().first(where: { !$0.labels.contains("SENT") && !$0.labels.contains("DRAFT") && $0.from.email != account.email.lowercased() }) else { return nil }
+        guard !thread.labels.contains("TRASH"), !thread.isSpam,
+              let incoming = thread.messages.reversed().first(where: { !$0.labels.contains("SENT") && !$0.labels.contains("DRAFT") && !$0.labels.contains("SPAM") && $0.from.email != account.email.lowercased() }) else { return nil }
         let decision = rules.rule(for: incoming.from.email)?.decision
         if decision == .blocked {
             if thread.labels.contains("INBOX") || thread.labels.contains("HEY/Screener") || !thread.labels.contains("HEY/Screened Out") {
@@ -427,6 +438,31 @@ actor MailService {
 
     private func archiveImpl(threadID: String, account: Account) async throws -> MailUndoToken {
         try await move(threadID: threadID, adding: [], removing: ["INBOX"], message: "Archived", account: account)
+    }
+
+    private func moveToSpamImpl(threadID: String, account: Account) async throws -> MailUndoToken {
+        try await prepare(account: account)
+        let state = try await capture(threadID: threadID, account: account)
+        _ = try await changeLabels(threadID: threadID, adding: ["SPAM"], removing: ["INBOX"], account: account)
+        try await store.remove(id: threadID, collection: "bubbles", accountID: account.id)
+        _ = try await refresh(threadID: threadID, accountID: account.id)
+        return register(message: "Moved to Spam", threads: [state], accountID: account.id)
+    }
+
+    /// Rescues the conversation into the Imbox and approves its senders, unless they already have a decision.
+    /// Undo restores the labels and removes only the approvals this added.
+    private func notSpamImpl(threadID: String, account: Account) async throws -> MailUndoToken {
+        try await prepare(account: account)
+        let state = try await capture(threadID: threadID, account: account)
+        let thread = try await changeLabels(threadID: threadID, adding: ["INBOX"], removing: ["SPAM"], account: account)
+        let rules = try await currentRuleIndex(accountID: account.id)
+        let senders = Set(thread.messages.filter { !$0.labels.contains("SENT") && !$0.labels.contains("DRAFT") }
+            .map { $0.from.email.lowercased() }
+            .filter { !$0.isEmpty && $0 != account.email.lowercased() && rules.rule(for: $0) == nil })
+        try await approveUnknown(Array(senders), account: account)
+        let token = register(message: "Not spam: moved to Imbox", threads: [state], accountID: account.id)
+        undoActions[token.id]?.affectedRuleKeys = senders
+        return token
     }
 
     private func trashImpl(threadID: String, account: Account) async throws -> MailUndoToken {
@@ -496,7 +532,7 @@ actor MailService {
         for var bubble in bubbles where bubble.surfacedAt == nil && bubble.dueAt <= now {
             do {
                 let current = try await refresh(threadID: bubble.threadID, accountID: account.id)
-                guard !current.labels.contains("TRASH"), !current.labels.contains("SPAM"), current.labels.contains("HEY/Bubble Up") else {
+                guard !current.labels.contains("TRASH"), !current.isSpam, current.labels.contains("HEY/Bubble Up") else {
                     try await store.remove(id: bubble.threadID, collection: "bubbles", accountID: account.id)
                     _ = try await refresh(threadID: bubble.threadID, accountID: account.id)
                     continue
@@ -843,10 +879,11 @@ actor MailService {
         return address.email
     }
 
-    private func threadIDs(query: String? = nil, labelIDs: [String] = []) async throws -> [String] {
+    private func threadIDs(query: String? = nil, labelIDs: [String] = [], includeSpamTrash: Bool = false) async throws -> [String] {
         var pageToken: String?, ids = Set<String>()
         repeat {
-            let page = try await api.listThreads(query: query, labelIDs: labelIDs, pageToken: pageToken, maxResults: 500)
+            let page = try await api.listThreads(query: query, labelIDs: labelIDs, pageToken: pageToken, maxResults: 500,
+                                                 includeSpamTrash: includeSpamTrash)
             ids.formUnion(page.items.map(\.id)); pageToken = page.nextPageToken
         } while pageToken != nil
         return Array(ids)

@@ -238,6 +238,7 @@ struct JumpMenu: View {
     private var listItems: [Item] {
         [Item(title: "Sent", symbol: "paperplane") { go(.sent) },
          Item(title: "Screened Out", symbol: "hand.raised") { go(.screenedOut) },
+         Item(title: store.unreadSpamCount > 0 ? "Spam (\(store.unreadSpamCount) new)" : "Spam", symbol: Mailbox.spam.symbol) { go(.spam) },
          Item(title: "Everything", symbol: "tray.full") { go(.allMail) },
          Item(title: "Screened senders", symbol: "person.crop.circle.badge.checkmark") { showsScreenedSenders = true },
          Item(title: "Write a new email", symbol: "square.and.pencil") { isPresented = false; store.composeRequest = UUID() }]

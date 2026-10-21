@@ -42,9 +42,9 @@ public actor GoogleAPI {
     }
 
     public func listThreads(query: String? = nil, labelIDs: [String] = [], pageToken: String? = nil,
-                            maxResults: Int = 100) async throws -> GooglePage<GoogleMailThread> {
+                            maxResults: Int = 100, includeSpamTrash: Bool = false) async throws -> GooglePage<GoogleMailThread> {
         let response = try await get(ThreadList.self, base: .gmail, path: ["threads"], query:
-            searchQuery(query, labels: labelIDs, pageToken: pageToken, maxResults: maxResults))
+            searchQuery(query, labels: labelIDs, pageToken: pageToken, maxResults: maxResults, includeSpamTrash: includeSpamTrash))
         return GooglePage(items: response.threads ?? [], nextPageToken: response.nextPageToken)
     }
 
@@ -289,10 +289,11 @@ public actor GoogleAPI {
         }
     }
 
-    private func searchQuery(_ query: String?, labels: [String], pageToken: String?, maxResults: Int) -> [URLQueryItem] {
+    private func searchQuery(_ query: String?, labels: [String], pageToken: String?, maxResults: Int,
+                             includeSpamTrash: Bool = false) -> [URLQueryItem] {
         [URLQueryItem(name: "q", value: query), URLQueryItem(name: "pageToken", value: pageToken),
          URLQueryItem(name: "maxResults", value: String(min(500, max(1, maxResults)))),
-         URLQueryItem(name: "includeSpamTrash", value: "false")].filter { $0.value != nil }
+         URLQueryItem(name: "includeSpamTrash", value: includeSpamTrash ? "true" : "false")].filter { $0.value != nil }
         + labels.map { URLQueryItem(name: "labelIds", value: $0) }
     }
 

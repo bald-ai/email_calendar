@@ -101,7 +101,7 @@ public final class MockGoogleBackend: @unchecked Sendable {
             state.labels.append(label)
             return saved(label)
         case ("GET", "threads", 1):
-            let ids = matchingThreads(query: query["q"], labelIDs: labelIDs)
+            let ids = matchingThreads(query: query["q"], labelIDs: labelIDs, includeSpamTrash: query["includeSpamTrash"] == "true")
             let page = paginate(ids, query: query)
             return ok(ThreadListBody(threads: page.items.map { id in
                 GoogleMailThread(id: id, historyId: String(state.historyID), snippet: state.thread(id).last?.snippet, messages: nil)
@@ -291,12 +291,12 @@ public final class MockGoogleBackend: @unchecked Sendable {
         return !exceptions.contains(sender)
     }
 
-    private func matchingThreads(query: String?, labelIDs: [String], messages: Bool = false) -> [String] {
+    private func matchingThreads(query: String?, labelIDs: [String], messages: Bool = false, includeSpamTrash: Bool = false) -> [String] {
         let terms = MockQuery(query ?? "")
         let candidates = state.messages.values.filter { message in
             labelIDs.allSatisfy(message.labelIds.contains)
-                && (terms.includesTrash || labelIDs.contains("TRASH") || !message.labelIds.contains("TRASH"))
-                && !message.labelIds.contains("SPAM")
+                && (includeSpamTrash || terms.includesTrash || labelIDs.contains("TRASH") || !message.labelIds.contains("TRASH"))
+                && (includeSpamTrash || terms.includesSpam || labelIDs.contains("SPAM") || !message.labelIds.contains("SPAM"))
                 && terms.matches(message, labels: state.labels)
         }
         let sorted = candidates.sorted { $0.internalDate > $1.internalDate }

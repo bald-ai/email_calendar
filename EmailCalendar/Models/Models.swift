@@ -10,7 +10,7 @@ public struct Account: Codable, Sendable, Identifiable, Equatable {
 }
 
 public enum Mailbox: String, CaseIterable, Identifiable, Sendable {
-    case imbox, setAside, bubbleUp, screener, screenedOut, sent, drafts, allMail, calendar
+    case imbox, setAside, bubbleUp, screener, screenedOut, spam, sent, drafts, allMail, calendar
     public var id: String { rawValue }
     public var title: String {
         switch self {
@@ -19,6 +19,7 @@ public enum Mailbox: String, CaseIterable, Identifiable, Sendable {
         case .bubbleUp: "Bubble Up"
         case .screener: "Screener"
         case .screenedOut: "Screened Out"
+        case .spam: "Spam"
         case .sent: "Sent"
         case .drafts: "Drafts"
         case .allMail: "Everything"
@@ -32,6 +33,7 @@ public enum Mailbox: String, CaseIterable, Identifiable, Sendable {
         case .bubbleUp: "bubbles.and.sparkles"
         case .screener: "person.crop.circle.badge.questionmark"
         case .screenedOut: "hand.raised"
+        case .spam: "xmark.bin"
         case .sent: "paperplane"
         case .drafts: "square.and.pencil"
         case .allMail: "archivebox"
@@ -129,6 +131,13 @@ public struct MailThread: Codable, Sendable, Identifiable, Equatable {
             .max { $0.date < $1.date }?.from ?? latestMessage?.from ?? MailAddress(email: "")
     }
     public var isSetAside: Bool { labels.contains("HEY/Set Aside") }
+    /// Gmail marks spam per message. A conversation counts as spam only when every message is,
+    /// so one spam reply never hides the rest of it; Spam lists any conversation that has one.
+    public var hasSpam: Bool { labels.contains("SPAM") }
+    public var isSpam: Bool {
+        let real = messages.filter { !$0.labels.contains("DRAFT") }
+        return hasSpam && (real.isEmpty ? true : real.allSatisfy { $0.labels.contains("SPAM") })
+    }
 }
 
 public struct OutgoingAttachment: Codable, Sendable, Identifiable, Equatable {

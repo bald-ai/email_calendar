@@ -36,6 +36,8 @@ final class AppStore {
     var errorMessage: String?
     var undoMessage: String?
     var lastSyncedAt: Date?
+    /// The current search was started from Spam and is limited to it.
+    @ObservationIgnored private var searchIncludesSpam = false
     /// Verified Gmail "Send mail as" addresses, the account's own first; the composer offers them as From.
     var sendAddresses: [String] = []
     @ObservationIgnored private var sendAddressesCheckedAt: Date?
@@ -314,10 +316,12 @@ final class AppStore {
             searchQuery = ""; threads = cachedThreads; return
         }
         guard let account, let mail else { return }
+        searchIncludesSpam = navigation == .spam
+        let scoped = searchScoped(query)
         do {
             isSearching = true
             defer { if generation == searchGeneration { isSearching = false; searchTask = nil } }
-            let task = Task { try await mail.searchPage(query: query, account: account) }
+            let task = Task { [searchIncludesSpam] in try await mail.searchPage(query: scoped, includeSpamTrash: searchIncludesSpam, account: account) }
             searchTask = task
             let result = try await task.value
             guard generation == searchGeneration, self.account?.id == account.id else { return }
@@ -325,13 +329,16 @@ final class AppStore {
         } catch { if generation == searchGeneration { reportError(error) } }
     }
 
+    /// Searching from the Spam folder looks only inside Spam, so a missing email can be found there.
+    private func searchScoped(_ query: String) -> String { searchIncludesSpam ? "in:spam (\(query))" : query }
+
     func loadMoreSearch() async {
         guard !isSearching, let token = searchNextPageToken, let mail, let account else { return }
-        let generation = searchGeneration, query = searchQuery
+        let generation = searchGeneration, query = searchScoped(searchQuery), spam = searchIncludesSpam
         isSearching = true
         defer { if generation == searchGeneration { isSearching = false; searchTask = nil } }
         do {
-            let task = Task { try await mail.searchPage(query: query, pageToken: token, account: account) }
+            let task = Task { try await mail.searchPage(query: query, pageToken: token, includeSpamTrash: spam, account: account) }
             searchTask = task
             let page = try await task.value
             guard generation == searchGeneration, self.account?.id == account.id else { return }
@@ -381,15 +388,19 @@ final class AppStore {
         let result = threads.filter { thread in
             if !searchQuery.isEmpty { return true }
             let labels = thread.labels
-            if labels.contains("TRASH") || labels.contains("SPAM") { return false }
+            if labels.contains("TRASH") { return false }
+            if mailbox == .spam { return thread.hasSpam }
+            if thread.isSpam { return false }
             switch mailbox {
             case .imbox:
-                let sender = thread.messages.filter { !isOwnAddress($0.from.email) }.max { $0.date < $1.date }?.from.email ?? thread.sender.email
+                let sender = thread.messages.filter { !isOwnAddress($0.from.email) && !$0.labels.contains("SPAM") }
+                    .max { $0.date < $1.date }?.from.email ?? thread.sender.email
                 return labels.contains("INBOX") && decision(for: sender) == .approved
             case .setAside: return labels.contains("HEY/Set Aside")
             case .bubbleUp: return labels.contains("HEY/Bubble Up")
             case .screener: return labels.contains("HEY/Screener")
             case .screenedOut: return labels.contains("HEY/Screened Out")
+            case .spam: return thread.hasSpam
             case .sent: return labels.contains("SENT")
             case .drafts: return labels.contains("DRAFT")
             case .allMail: return true
@@ -473,6 +484,15 @@ final class AppStore {
         guard account?.id == thread.accountID else { return }
         await performMailAction { mail, account in try await mail.trash(threadID: thread.id, account: account) }
     }
+    func moveToSpam(_ thread: MailThread) async {
+        guard account?.id == thread.accountID else { return }
+        await performMailAction { mail, account in try await mail.moveToSpam(threadID: thread.id, account: account) }
+    }
+    func notSpam(_ thread: MailThread) async {
+        guard account?.id == thread.accountID else { return }
+        await performMailAction { mail, account in try await mail.notSpam(threadID: thread.id, account: account) }
+    }
+    var unreadSpamCount: Int { cachedThreads.filter { $0.hasSpam && $0.unread && !$0.labels.contains("TRASH") }.count }
     func setRead(_ thread: MailThread, _ read: Bool) async {
         guard let mail, let account, account.id == thread.accountID else { return }
         do {
@@ -730,7 +750,7 @@ final class AppStore {
             if !query.isEmpty, let account, account.id == accountID {
                 let changed = threads.filter { before[$0.id] != $0.labels }
                 for thread in changed {
-                    let matches = try await mail.matchesSearch(thread, query: query, account: account)
+                    let matches = try await mail.matchesSearch(thread, query: searchScoped(query), includeSpamTrash: searchIncludesSpam, account: account)
                     guard generation == searchGeneration, self.account?.id == accountID else { return }
                     if !matches { threads.removeAll { $0.id == thread.id } }
                 }

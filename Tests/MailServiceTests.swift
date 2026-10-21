@@ -115,6 +115,12 @@ private final class MailMockServer: @unchecked Sendable {
             changedIDs.insert(id)
         }
     }
+    func addSpam(id: String, from: String) {
+        lock.withLock {
+            messages[id] = Message(id: id, threadID: id, from: from, to: "owner@example.com", labels: ["SPAM", "UNREAD"])
+            changedIDs.insert(id)
+        }
+    }
     func addSentPart(threadID: String) {
         lock.withLock { messages["reply"] = Message(id: "reply", threadID: threadID, from: "owner@example.com", to: "known@example.com", labels: ["SENT"]) }
     }
@@ -399,6 +405,48 @@ final class MailServiceTests: XCTestCase, @unchecked Sendable {
         _ = try await service.sync(account: account)
         XCTAssertTrue(server.labels(messageID: "known").contains("INBOX"))
         XCTAssertFalse(server.labels(messageID: "known").contains("out"))
+    }
+
+    func testFirstSyncCachesSpamSoItCanBeBrowsed() async throws {
+        let (service, _, server, account) = try fixture()
+        server.addSpam(id: "junk", from: "maybe@unknown.org")
+        let snapshot = try await service.sync(account: account)
+        let junk = try XCTUnwrap(snapshot.threads.first { $0.id == "junk" })
+        XCTAssertTrue(junk.isSpam)
+        // A spam sender is not approved just because the message sat in the folder at first sync.
+        XCTAssertNil(snapshot.rules.first { $0.key == "maybe@unknown.org" })
+    }
+
+    func testNotSpamMovesToInboxApprovesSenderAndUndoRestoresBoth() async throws {
+        let (service, _, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        server.addSpam(id: "junk", from: "maybe@unknown.org")
+        _ = try await service.sync(account: account)
+        let rescue = try await service.notSpam(threadID: "junk", account: account)
+        XCTAssertEqual(server.labels(messageID: "junk"), ["INBOX", "UNREAD"])
+        var rules = try await service.cached(accountID: account.id).rules
+        XCTAssertEqual(rules.first { $0.key == "maybe@unknown.org" }?.decision, .approved)
+
+        try await service.undo(tokenID: rescue.id, account: account)
+        XCTAssertEqual(server.labels(messageID: "junk"), ["SPAM", "UNREAD"])
+        rules = try await service.cached(accountID: account.id).rules
+        XCTAssertNil(rules.first { $0.key == "maybe@unknown.org" })
+    }
+
+    func testNotSpamKeepsAnExistingDecisionAndMoveToSpamUndoes() async throws {
+        let (service, _, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        _ = try await service.moveToSpam(threadID: "known", account: account)
+        XCTAssertEqual(server.labels(messageID: "known"), ["SPAM", "UNREAD"])
+        let rescue = try await service.notSpam(threadID: "known", account: account)
+        try await service.undo(tokenID: rescue.id, account: account)
+        // The sender was approved before it was reported, so undoing the rescue must keep that approval.
+        let rules = try await service.cached(accountID: account.id).rules
+        XCTAssertEqual(rules.first { $0.key == "known@example.com" }?.decision, .approved)
+        XCTAssertEqual(server.labels(messageID: "known"), ["SPAM", "UNREAD"])
+        let again = try await service.moveToSpam(threadID: "known", account: account)
+        try await service.undo(tokenID: again.id, account: account)
+        XCTAssertEqual(server.labels(messageID: "known"), ["SPAM", "UNREAD"])
     }
 
     func testSendAddressesListOnlyVerifiedAliasesAndSendUsesChosenOne() async throws {

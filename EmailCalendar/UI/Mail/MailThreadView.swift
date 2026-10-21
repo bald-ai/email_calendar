@@ -87,6 +87,8 @@ struct MailThreadView: View {
             }
             moreItem("Link to an event or to-do", symbol: "link") { act(.link) }
             moreItem(thread.unread ? "Mark as read" : "Mark as unread", symbol: "envelope.badge") { act(.toggleRead) }
+            if thread.hasSpam { moreItem("Not spam", symbol: "checkmark.shield") { act(.notSpam) } }
+            else { moreItem("Move to Spam", symbol: Mailbox.spam.symbol) { act(.spam) } }
             moreItem("Move to Trash", symbol: "trash") { act(.trash) }
         }
         .padding(8).frame(width: 220)

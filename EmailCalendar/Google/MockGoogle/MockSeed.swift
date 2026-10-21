@@ -105,6 +105,13 @@ enum MockSeed {
         add("t-mom", from: "Eva Rivera <eva.rivera@seznam.cz>", subject: "Sunday lunch?",
             body: "Are you coming on Sunday? I'm making svíčková. Bring Tom if he's free!", ago: 20 * hour, labels: ["INBOX", "UNREAD"])
 
+        // Gmail's Spam folder: one real email caught by mistake (rescue it with Not spam), one actual spam.
+        add("t-spam-recruiter", from: "Petra Novak <petra@talentbridge.example>", subject: "Product role — quick chat this week?",
+            body: "Hi Alex,\n\nI saw your work on the email client and have a product role that fits. Are you free for 20 minutes on Thursday?\n\nPetra",
+            ago: 7 * hour, labels: ["SPAM", "UNREAD"])
+        add("t-spam-prize", from: "Rewards Desk <winner@prize-claims.example>", subject: "You have been selected!!!",
+            body: "Claim your reward today. Limited time only.", ago: 3 * day, labels: ["SPAM"])
+
         add("t-lease", from: jana, subject: "Lease renewal", body: "Attached is the renewed lease for next year. No changes except the dates.",
             ago: 10 * day, labels: [setAside],
             attachments: [("lease-2027.txt", "text/plain", "Residential lease\nTerm: 1 Jan 2027 – 31 Dec 2027\nRent unchanged.\n")])

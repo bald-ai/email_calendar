@@ -40,3 +40,24 @@ final class SendIdentityTests: XCTestCase {
         XCTAssertNil(try JSONDecoder().decode(OutgoingMessage.self, from: JSONSerialization.data(withJSONObject: record)).from)
     }
 }
+
+final class SpamThreadTests: XCTestCase {
+    private func thread(_ labels: [Set<String>]) -> MailThread {
+        let messages = labels.enumerated().map { index, labels in
+            MailMessage(id: "m\(index)", threadID: "t", accountID: "owner@example.com", from: MailAddress(email: "a@example.net"), labels: labels)
+        }
+        return MailThread(id: "t", accountID: "owner@example.com", messages: messages,
+                          labels: labels.reduce(into: Set<String>()) { $0.formUnion($1) })
+    }
+
+    func testOneSpamReplyDoesNotHideTheConversation() {
+        let mixed = thread([["INBOX"], ["SPAM"]])
+        XCTAssertTrue(mixed.hasSpam)
+        XCTAssertFalse(mixed.isSpam)
+    }
+
+    func testConversationIsSpamWhenEveryRealMessageIs() {
+        XCTAssertTrue(thread([["SPAM"], ["SPAM", "UNREAD"], ["DRAFT"]]).isSpam)
+        XCTAssertFalse(thread([["INBOX"]]).hasSpam)
+    }
+}
