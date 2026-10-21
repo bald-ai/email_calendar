@@ -130,10 +130,12 @@ struct MailRootView: View {
                 let message = try await store.fullMessage(message)
                 guard store.account?.id == accountID, message.accountID == accountID else { return }
                 switch action {
-                case .reply: composition = .reply(to: message, accountEmail: store.accountEmail, all: false)
-                case .replyAll: composition = .reply(to: message, accountEmail: store.accountEmail, all: true)
+                case .reply: composition = .reply(to: message, accountEmail: store.accountEmail, sendAddresses: store.sendAddresses, all: false)
+                case .replyAll: composition = .reply(to: message, accountEmail: store.accountEmail, sendAddresses: store.sendAddresses, all: true)
                 case .forward, .editDraft:
-                    var request = action == .forward ? MailComposition.forward(message) : MailComposition.draft(message)
+                    var request = action == .forward
+                        ? MailComposition.forward(message, accountEmail: store.accountEmail, sendAddresses: store.sendAddresses)
+                        : MailComposition.draft(message, accountEmail: store.accountEmail)
                     for attachment in message.attachments {
                         let data = try await store.attachmentData(attachment, message: message)
                         request.message.attachments.append(OutgoingAttachment(name: attachment.name, mimeType: attachment.mimeType, data: data))

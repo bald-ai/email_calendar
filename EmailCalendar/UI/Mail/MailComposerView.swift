@@ -26,30 +26,35 @@ struct MailComposition: Identifiable {
 
     static var newMessage: MailComposition { MailComposition(title: "New message", message: OutgoingMessage()) }
 
-    static func reply(to original: MailMessage, accountEmail: String, all: Bool) -> MailComposition {
-        let own = accountEmail.lowercased()
-        let primary = original.from.email.lowercased() == own ? original.to.map(\.email) : (original.replyTo.isEmpty ? [original.from.email] : original.replyTo.map(\.email))
+    /// `sendAddresses` are the account's verified send-as addresses: none of them gets a copy of the reply,
+    /// and the reply goes out from the one the original involved (mail forwarded from another address included).
+    static func reply(to original: MailMessage, accountEmail: String, sendAddresses: [String], all: Bool) -> MailComposition {
+        let own = Set(([accountEmail] + sendAddresses).map { $0.lowercased() })
+        let primary = own.contains(original.from.email.lowercased()) ? original.to.map(\.email) : (original.replyTo.isEmpty ? [original.from.email] : original.replyTo.map(\.email))
         let recipients = all ? primary + original.to.map(\.email) : primary
-        var to = unique(recipients.filter { $0.lowercased() != own })
+        var to = unique(recipients.filter { !own.contains($0.lowercased()) })
         if to.isEmpty { to = unique(primary) }
-        let cc = all ? unique(original.cc.map(\.email).filter { $0.lowercased() != own && !to.map { $0.lowercased() }.contains($0.lowercased()) }) : []
+        let cc = all ? unique(original.cc.map(\.email).filter { !own.contains($0.lowercased()) && !to.map { $0.lowercased() }.contains($0.lowercased()) }) : []
         var references = original.references
         if let messageID = original.rfcMessageID, !references.contains(messageID) { references.append(messageID) }
         return MailComposition(title: all ? "Reply all" : "Reply", message: OutgoingMessage(
             to: to, cc: cc, subject: prefixed(original.subject, prefix: "Re:"), body: "\n\n" + quote(original),
-            threadID: original.threadID, inReplyTo: original.rfcMessageID, references: references))
+            threadID: original.threadID, inReplyTo: original.rfcMessageID, references: references,
+            from: SendIdentity.address(for: original, addresses: sendAddresses, accountEmail: accountEmail)))
     }
 
-    static func forward(_ original: MailMessage) -> MailComposition {
-        MailComposition(title: "Forward", message: OutgoingMessage(subject: prefixed(original.subject, prefix: "Fwd:"), body: "\n\n" + quote(original)))
+    static func forward(_ original: MailMessage, accountEmail: String, sendAddresses: [String]) -> MailComposition {
+        MailComposition(title: "Forward", message: OutgoingMessage(subject: prefixed(original.subject, prefix: "Fwd:"), body: "\n\n" + quote(original),
+            from: SendIdentity.address(for: original, addresses: sendAddresses, accountEmail: accountEmail)))
     }
 
-    static func draft(_ original: MailMessage) -> MailComposition {
+    static func draft(_ original: MailMessage, accountEmail: String) -> MailComposition {
         MailComposition(title: "Draft", message: OutgoingMessage(to: original.to.map(\.email), cc: original.cc.map(\.email),
             bcc: original.bcc.map(\.email), subject: original.subject, body: original.plainText.isEmpty ? (original.html.map(plainText(from:)) ?? "") : original.plainText,
             draftID: original.draftID, threadID: original.threadID,
             inReplyTo: original.inReplyTo, references: original.references,
-            rfcMessageID: original.rfcMessageID ?? "<\(UUID().uuidString.lowercased())@emailcalendar.local>"))
+            rfcMessageID: original.rfcMessageID ?? "<\(UUID().uuidString.lowercased())@emailcalendar.local>",
+            from: original.from.email.isEmpty || original.from.email.lowercased() == accountEmail.lowercased() ? nil : original.from.email))
     }
 
     private static func unique(_ addresses: [String]) -> [String] {
@@ -125,6 +130,7 @@ struct MailComposerView: View {
                     TextField("", text: $draft.message.subject, prompt: Text("Subject").foregroundStyle(Theme.secondary.opacity(0.6)), axis: .vertical)
                         .textFieldStyle(.plain).font(.system(size: 30, weight: .bold)).padding(.bottom, 16)
                     VStack(spacing: 10) {
+                        if fromChoices.count > 1 { fromRow }
                         HStack(alignment: .firstTextBaseline) {
                             recipientRow("To", value: $draft.to, field: .to)
                             Button(showsMoreRecipients ? "Hide Cc/Bcc" : "Cc/Bcc") { showsMoreRecipients.toggle() }
@@ -229,6 +235,26 @@ struct MailComposerView: View {
                 }
                 draft.message.attachments += additions
             } catch { errorText = error.localizedDescription }
+        }
+    }
+
+    /// The account's send-as addresses, plus a draft's own From if Gmail no longer lists it.
+    private var fromChoices: [String] {
+        var choices = store.sendAddresses.isEmpty ? [store.accountEmail] : store.sendAddresses
+        if let from = message.from, !choices.contains(where: { $0.lowercased() == from.lowercased() }) { choices.append(from) }
+        return choices
+    }
+
+    private var fromRow: some View {
+        HStack(spacing: 10) {
+            Text("From").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.secondary).frame(width: 34, alignment: .leading)
+            Menu {
+                ForEach(fromChoices, id: \.self) { address in
+                    Button(address) { draft.message.from = address.lowercased() == store.accountEmail.lowercased() ? nil : address }
+                }
+            } label: { Text(message.from ?? store.accountEmail).font(.system(size: 14)) }
+                .menuStyle(.borderlessButton).fixedSize()
+            Spacer()
         }
     }
 

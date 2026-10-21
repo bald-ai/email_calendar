@@ -209,6 +209,18 @@ actor MailService {
     func saveDraft(_ outgoing: OutgoingMessage, account: Account) async throws -> OutgoingMessage {
         try await serialized(accountID: account.id) { try await self.saveDraftImpl(outgoing, account: account) }
     }
+    /// Verified Gmail "Send mail as" addresses, the account's own first. Cached so the composer works offline.
+    func sendAddresses(account: Account) async throws -> [String] {
+        let entries = try await tracked { try await self.api.sendAs() }
+        var seen: Set<String> = [account.email.lowercased()]
+        let aliases = entries.filter { $0.isPrimary != true && $0.verificationStatus == "accepted" }.map(\.sendAsEmail)
+        let addresses = [account.email] + aliases.filter { seen.insert($0.lowercased()).inserted }
+        try await store.setMetadata(addresses, key: "sendAs", accountID: account.id)
+        return addresses
+    }
+    func cachedSendAddresses(accountID: String) async throws -> [String] {
+        try await store.metadata([String].self, key: "sendAs", accountID: accountID) ?? []
+    }
     @discardableResult
     func send(_ outgoing: OutgoingMessage, account: Account) async throws -> MailSendReceipt {
         try await serialized(accountID: account.id) { try await self.sendImpl(outgoing, account: account) }
@@ -560,7 +572,7 @@ actor MailService {
     private func saveDraftImpl(_ outgoing: OutgoingMessage, account: Account) async throws -> OutgoingMessage {
         try await prepare(account: account)
         if try await sendAttempt(outgoing, account: account) != nil { throw MailDeliveryUncertainError() }
-        let raw = try MIMEComposer.compose(outgoing, from: account.email)
+        let raw = try MIMEComposer.compose(outgoing, from: outgoing.from ?? account.email)
         let draft: GoogleDraft
         if let id = outgoing.draftID { draft = try await api.updateDraft(id: id, raw: raw, threadID: outgoing.threadID) }
         else { draft = try await api.createDraft(raw: raw, threadID: outgoing.threadID) }
@@ -587,7 +599,7 @@ actor MailService {
         guard !outgoing.to.isEmpty || !outgoing.cc.isEmpty || !outgoing.bcc.isEmpty else { throw MailError.noRecipients }
         var outgoing = outgoing
         if outgoing.rfcMessageID == nil { outgoing.rfcMessageID = "<\(UUID().uuidString.lowercased())@emailcalendar.local>" }
-        let raw = try MIMEComposer.compose(outgoing, from: account.email)
+        let raw = try MIMEComposer.compose(outgoing, from: outgoing.from ?? account.email)
         // Draft updates cannot deliver mail. Finish this step before recording an attempt.
         if let draftID = outgoing.draftID { _ = try await api.updateDraft(id: draftID, raw: raw, threadID: outgoing.threadID) }
         let attempt = MailSendAttempt(rfcMessageID: outgoing.rfcMessageID!, startedAt: .now, receipt: nil)

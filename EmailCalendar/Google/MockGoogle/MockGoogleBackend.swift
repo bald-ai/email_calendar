@@ -191,6 +191,8 @@ public final class MockGoogleBackend: @unchecked Sendable {
             state.messages[messageID] = message
             recordHistory(message)
             return saved(messageJSON(message))
+        case ("GET", "settings", 2) where parts[1] == "sendAs":
+            return ok(["sendAs": [GoogleSendAs(sendAsEmail: Self.accountEmail, isPrimary: true)]])
         case ("GET", "settings", 2) where parts[1] == "filters":
             return ok(["filter": state.filters])
         case ("POST", "settings", 2) where parts[1] == "filters":

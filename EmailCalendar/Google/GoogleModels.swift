@@ -87,6 +87,14 @@ public struct GoogleLabel: Codable, Sendable, Identifiable {
     public var labelListVisibility: String?
 }
 
+/// A Gmail "Send mail as" address. The account's own address is listed with `isPrimary`.
+public struct GoogleSendAs: Codable, Sendable {
+    public var sendAsEmail: String
+    public var displayName: String?
+    public var isPrimary: Bool?
+    public var verificationStatus: String?
+}
+
 public struct GoogleDraft: Codable, Sendable, Identifiable {
     public var id: String
     public var message: GoogleMailMessage?

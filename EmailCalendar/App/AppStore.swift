@@ -36,6 +36,9 @@ final class AppStore {
     var errorMessage: String?
     var undoMessage: String?
     var lastSyncedAt: Date?
+    /// Verified Gmail "Send mail as" addresses, the account's own first; the composer offers them as From.
+    var sendAddresses: [String] = []
+    @ObservationIgnored private var sendAddressesCheckedAt: Date?
     /// To-dos and the links between email threads and events or to-dos.
     var planner = PlannerSnapshot()
     /// The drawer beside mail: 1 shows Days, -1 shows To-do, 0 shows mail alone.
@@ -219,6 +222,7 @@ final class AppStore {
             }
         } catch { isSigningIn = false; reportError(error); return }
         isSigningIn = false
+        sendAddresses = []; sendAddressesCheckedAt = nil
         await loadCache()
         await restoreDraft()
         if bubbleNotifications { await requestNotificationPermission() }
@@ -234,6 +238,7 @@ final class AppStore {
         account = nil; threads = []; cachedThreads = []; senderRules = []; remoteImageSenders = []
         calendars = []; events = []; selectedThreadID = nil; selectedEventID = nil; openThreadID = nil; poweringThrough = false
         planner = PlannerSnapshot(); linkingThreadID = nil; plannerReveal = nil
+        sendAddresses = []; sendAddressesCheckedAt = nil
         searchTask?.cancel(); searchTask = nil; searchGeneration += 1; searchNextPageToken = nil; isSearching = false
         searchQuery = ""; undoMessage = nil; undoID = nil; undoFollowUp = nil; localUndo = nil; undoTask?.cancel()
         await mail?.cancelAllOperations()
@@ -273,6 +278,17 @@ final class AppStore {
             }
             lastSyncedAt = .now
         } catch { reportError(error) }
+        await refreshSendAddresses(account: account)
+    }
+
+    /// Checked every few minutes, so an alias added in Gmail appears without a relaunch.
+    private func refreshSendAddresses(account: Account) async {
+        guard let mail, self.account?.id == account.id,
+              sendAddressesCheckedAt.map({ Date.now.timeIntervalSince($0) > 300 }) ?? true else { return }
+        sendAddressesCheckedAt = .now
+        // Optional: without the list, mail still sends from the account's own address.
+        guard let addresses = try? await mail.sendAddresses(account: account), self.account?.id == account.id else { return }
+        sendAddresses = addresses
     }
 
     func refreshCalendar(range: DateInterval) async {
@@ -368,7 +384,7 @@ final class AppStore {
             if labels.contains("TRASH") || labels.contains("SPAM") { return false }
             switch mailbox {
             case .imbox:
-                let sender = thread.messages.filter { $0.from.email.lowercased() != accountEmail.lowercased() }.max { $0.date < $1.date }?.from.email ?? thread.sender.email
+                let sender = thread.messages.filter { !isOwnAddress($0.from.email) }.max { $0.date < $1.date }?.from.email ?? thread.sender.email
                 return labels.contains("INBOX") && decision(for: sender) == .approved
             case .setAside: return labels.contains("HEY/Set Aside")
             case .bubbleUp: return labels.contains("HEY/Bubble Up")
@@ -438,9 +454,14 @@ final class AppStore {
     }
 
     func decision(for sender: String) -> ScreeningDecision? {
-        let address = sender.lowercased()
-        if address == accountEmail.lowercased() { return .approved }
-        return senderRuleIndex.rule(for: address)?.decision
+        if isOwnAddress(sender) { return .approved }
+        return senderRuleIndex.rule(for: sender.lowercased())?.decision
+    }
+
+    /// The account's address or one of its send-as addresses, so replies sent as an alias count as ours.
+    func isOwnAddress(_ address: String) -> Bool {
+        let address = address.lowercased()
+        return address == accountEmail.lowercased() || sendAddresses.contains { $0.lowercased() == address }
     }
 
     @discardableResult
@@ -694,6 +715,9 @@ final class AppStore {
             try await loadMailCache(accountID: account.id)
             try await loadCalendarCache(accountID: account.id)
             try await loadPlanner(accountID: account.id)
+            if let cached = try await mail?.cachedSendAddresses(accountID: account.id), self.account?.id == account.id {
+                sendAddresses = cached
+            }
         } catch { reportError(error) }
     }
     private func loadMailCache(accountID: String) async throws {

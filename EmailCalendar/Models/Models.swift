@@ -154,14 +154,28 @@ public struct OutgoingMessage: Codable, Sendable, Equatable {
     public var threadID: String?
     public var inReplyTo: String?
     public var references: [String]
+    /// A verified Gmail "Send mail as" address; nil sends from the account's own address.
+    public var from: String?
     public init(to: [String] = [], cc: [String] = [], bcc: [String] = [], subject: String = "", body: String = "",
                 attachments: [OutgoingAttachment] = [], draftID: String? = nil, threadID: String? = nil,
                 inReplyTo: String? = nil, references: [String] = [],
-                rfcMessageID: String? = "<\(UUID().uuidString.lowercased())@emailcalendar.local>") {
+                rfcMessageID: String? = "<\(UUID().uuidString.lowercased())@emailcalendar.local>", from: String? = nil) {
         self.to = to; self.cc = cc; self.bcc = bcc; self.subject = subject; self.body = body
         self.attachments = attachments; self.draftID = draftID; self.threadID = threadID
         self.inReplyTo = inReplyTo; self.references = references
-        self.rfcMessageID = rfcMessageID
+        self.rfcMessageID = rfcMessageID; self.from = from
+    }
+}
+
+/// Picks which of the account's "Send mail as" addresses a reply or forward goes out from.
+public enum SendIdentity {
+    /// The address the original was sent from (when it is one of ours) or to; nil means the account's own address.
+    /// `addresses` are the verified Gmail send-as addresses, including the account's own.
+    public static func address(for original: MailMessage, addresses: [String], accountEmail: String) -> String? {
+        let own = Dictionary(addresses.map { ($0.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
+        let involved = ([original.from] + original.to + original.cc).map { $0.email.lowercased() }
+        guard let match = involved.first(where: { own[$0] != nil }), match != accountEmail.lowercased() else { return nil }
+        return own[match]
     }
 }
 

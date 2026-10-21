@@ -84,6 +84,7 @@ private final class MailMockServer: @unchecked Sendable {
     private var recordedRequestCount = 0
     private var shouldFailAfterSend = false
     private var sendCount = 0
+    private var sentRaw: [String] = []
     private var draftCreateCount = 0
     private var shouldFailDraftRefresh = false
     private var labelNames = ["INBOX": "INBOX", "UNREAD": "UNREAD", "SENT": "SENT", "DRAFT": "DRAFT", "TRASH": "TRASH",
@@ -136,6 +137,7 @@ private final class MailMockServer: @unchecked Sendable {
     func failRefreshAfterSend() { lock.withLock { shouldFailAfterSend = true } }
     var requestCount: Int { lock.withLock { recordedRequestCount } }
     var confirmedSendCount: Int { lock.withLock { sendCount } }
+    var lastSentRaw: String? { lock.withLock { sentRaw.last } }
     func expireHistory() { lock.withLock { expiredHistory = true } }
     func failOneMutation() { lock.withLock { failNextModify = true } }
     func labels(messageID: String) -> Set<String> { lock.withLock { messages[messageID]?.labels ?? [] } }
@@ -159,8 +161,15 @@ private final class MailMockServer: @unchecked Sendable {
             if path == ["labels"] {
                 return (200, ["labels": labelNames.map { ["id": $0.key, "name": $0.value, "type": "user"] }])
             }
+            if path == ["settings", "sendAs"] {
+                return (200, ["sendAs": [
+                    ["sendAsEmail": "owner@example.com", "isPrimary": true],
+                    ["sendAsEmail": "work@example.org", "verificationStatus": "accepted"],
+                    ["sendAsEmail": "pending@example.org", "verificationStatus": "pending"]]])
+            }
             if path == ["messages", "send"] {
                 sendCount += 1
+                if let raw = body["raw"] as? String, let data = Data(base64URL: raw) { sentRaw.append(String(decoding: data, as: UTF8.self)) }
                 let sent = Message(id: "confirmed-send", threadID: "sent-thread", from: "owner@example.com", to: "known@example.com", labels: ["SENT"])
                 messages[sent.id] = sent
                 return (200, sent.json)
@@ -390,6 +399,20 @@ final class MailServiceTests: XCTestCase, @unchecked Sendable {
         _ = try await service.sync(account: account)
         XCTAssertTrue(server.labels(messageID: "known").contains("INBOX"))
         XCTAssertFalse(server.labels(messageID: "known").contains("out"))
+    }
+
+    func testSendAddressesListOnlyVerifiedAliasesAndSendUsesChosenOne() async throws {
+        let (service, _, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        let addresses = try await service.sendAddresses(account: account)
+        XCTAssertEqual(addresses, ["owner@example.com", "work@example.org"])
+        let cached = try await service.cachedSendAddresses(accountID: account.id)
+        XCTAssertEqual(cached, addresses)
+
+        try await service.send(OutgoingMessage(to: ["known@example.com"], subject: "Hello", body: "As work", from: "work@example.org"), account: account)
+        XCTAssertTrue(try XCTUnwrap(server.lastSentRaw).contains("From: work@example.org\r\n"))
+        try await service.send(OutgoingMessage(to: ["known@example.com"], subject: "Hello", body: "As owner"), account: account)
+        XCTAssertTrue(try XCTUnwrap(server.lastSentRaw).contains("From: owner@example.com\r\n"))
     }
 
     func testConfirmedSendSucceedsWhenSubsequentCacheRefreshFails() async throws {

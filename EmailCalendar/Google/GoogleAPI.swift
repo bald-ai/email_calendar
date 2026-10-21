@@ -140,6 +140,10 @@ public actor GoogleAPI {
         try await get(FilterList.self, base: .gmail, path: ["settings", "filters"]).filter ?? []
     }
 
+    public func sendAs() async throws -> [GoogleSendAs] {
+        try await get(SendAsList.self, base: .gmail, path: ["settings", "sendAs"]).sendAs ?? []
+    }
+
     public func createFilter(_ filter: GoogleFilter) async throws -> GoogleFilter {
         try await mutate(GoogleFilter.self, base: .gmail, path: ["settings", "filters"], method: "POST", body: filter)
     }
@@ -301,6 +305,7 @@ public actor GoogleAPI {
     private struct LabelList: Decodable, Sendable { var labels: [GoogleLabel]? }
     private struct DraftList: Decodable, Sendable { var drafts: [GoogleDraft]?; var nextPageToken: String? }
     private struct FilterList: Decodable, Sendable { var filter: [GoogleFilter]? }
+    private struct SendAsList: Decodable, Sendable { var sendAs: [GoogleSendAs]? }
     private struct ErrorEnvelope: Decodable { var error: Detail; struct Detail: Decodable { var message: String } }
     private struct LabelMutation: Encodable, Sendable { var addLabelIds: [String]; var removeLabelIds: [String] }
     private struct LabelCreate: Encodable, Sendable {
