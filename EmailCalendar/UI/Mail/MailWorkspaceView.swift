@@ -37,7 +37,7 @@ struct MailRootView: View {
         thread?.messages.filter { !$0.labels.contains("DRAFT") && $0.draftID == nil }.max { $0.date < $1.date }
     }
     private func draftMessage(_ thread: MailThread?) -> MailMessage? {
-        thread?.messages.filter { $0.labels.contains("DRAFT") || $0.draftID != nil }.max { $0.date < $1.date }
+        thread?.messages.filter { ($0.labels.contains("DRAFT") || $0.draftID != nil) && !store.isPendingDraft($0.draftID) }.max { $0.date < $1.date }
     }
 
     var body: some View {
@@ -273,6 +273,9 @@ private struct MailboxPage: View {
             ScrollView {
                 VStack(spacing: 0) {
                     header.padding(.top, 28).padding(.bottom, 18)
+                    if mailbox == .imbox && !isSearch && !store.unresolvedPendingSends.isEmpty {
+                        PendingSendNotice().padding(.bottom, 18)
+                    }
                     content
                     if isSearch {
                         if store.isSearching { ProgressView("Searching…").padding() }

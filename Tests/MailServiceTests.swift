@@ -85,6 +85,8 @@ private final class MailMockServer: @unchecked Sendable {
     private var shouldFailAfterSend = false
     private var sendCount = 0
     private var sentRaw: [String] = []
+    private var draftSendCount = 0
+    private var draftSendFailure: Int?
     private var draftCreateCount = 0
     private var shouldFailDraftRefresh = false
     private var labelNames = ["INBOX": "INBOX", "UNREAD": "UNREAD", "SENT": "SENT", "DRAFT": "DRAFT", "TRASH": "TRASH",
@@ -144,6 +146,9 @@ private final class MailMockServer: @unchecked Sendable {
     var requestCount: Int { lock.withLock { recordedRequestCount } }
     var confirmedSendCount: Int { lock.withLock { sendCount } }
     var lastSentRaw: String? { lock.withLock { sentRaw.last } }
+    var sentDraftCount: Int { lock.withLock { draftSendCount } }
+    /// The next draft send answers with this HTTP status instead of sending (404 draft gone, 503 lost response).
+    func failNextDraftSend(status: Int) { lock.withLock { draftSendFailure = status } }
     func expireHistory() { lock.withLock { expiredHistory = true } }
     func failOneMutation() { lock.withLock { failNextModify = true } }
     func labels(messageID: String) -> Set<String> { lock.withLock { messages[messageID]?.labels ?? [] } }
@@ -185,6 +190,14 @@ private final class MailMockServer: @unchecked Sendable {
                 let message = Message(id: "draft-message", threadID: "draft-thread", from: "owner@example.com", to: "known@example.com", labels: ["DRAFT"])
                 messages[message.id] = message
                 return (200, ["id": "saved-draft", "message": message.json])
+            }
+            if path == ["drafts", "send"] {
+                draftSendCount += 1
+                if let status = draftSendFailure { draftSendFailure = nil; return (status, ["error": ["message": "Draft send failed"]]) }
+                let sent = Message(id: "draft-sent", threadID: "draft-thread", from: "owner@example.com", to: "known@example.com", labels: ["SENT"])
+                messages[sent.id] = sent
+                messages.removeValue(forKey: "draft-message")
+                return (200, sent.json)
             }
             if path == ["drafts", "saved-draft"], request.httpMethod == "PUT" {
                 return (200, ["id": "saved-draft", "message": messages["draft-message"]!.json])
@@ -405,6 +418,97 @@ final class MailServiceTests: XCTestCase, @unchecked Sendable {
         _ = try await service.sync(account: account)
         XCTAssertTrue(server.labels(messageID: "known").contains("INBOX"))
         XCTAssertFalse(server.labels(messageID: "known").contains("out"))
+    }
+
+    private func queue(_ service: MailService, _ account: Account) async throws -> PendingSend {
+        try await service.queueSend(OutgoingMessage(to: ["known@example.com"], subject: "Interview follow-up", body: "Thanks"),
+                                    delay: 30, account: account)
+    }
+
+    func testQueuedSendWaitsAndUndoLeavesTheDraftUnsent() async throws {
+        let (service, _, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        let pending = try await queue(service, account)
+        XCTAssertEqual(pending.status, .waiting)
+        XCTAssertEqual(server.createdDraftCount, 1)
+        let listed = try await service.pendingSends(accountID: account.id)
+        XCTAssertEqual(listed.map(\.draftID), ["saved-draft"])
+
+        let undone = try await service.cancelPendingSend(draftID: pending.draftID, account: account)
+        XCTAssertNotNil(undone)
+        let afterUndo = try await service.deliverPendingSend(draftID: pending.draftID, account: account)
+        XCTAssertNil(afterUndo)
+        XCTAssertEqual(server.sentDraftCount, 0)
+        let remaining = try await service.pendingSends(accountID: account.id)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func testDeliverSendsTheSavedDraftExactlyOnce() async throws {
+        let (service, _, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        let pending = try await queue(service, account)
+        let receipt = try await service.deliverPendingSend(draftID: pending.draftID, account: account)
+        XCTAssertEqual(receipt?.messageID, "draft-sent")
+        let again = try await service.deliverPendingSend(draftID: pending.draftID, account: account)
+        XCTAssertNil(again)
+        XCTAssertEqual(server.sentDraftCount, 1)
+        let tooLate = try await service.cancelPendingSend(draftID: pending.draftID, account: account)
+        XCTAssertNil(tooLate)
+    }
+
+    func testLostConfirmationBecomesUncertainAndIsNeverResent() async throws {
+        let (service, _, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        let pending = try await queue(service, account)
+        server.failNextDraftSend(status: 503)
+        let receipt = try await service.deliverPendingSend(draftID: pending.draftID, account: account)
+        XCTAssertNil(receipt)
+        var record = try await service.pendingSends(accountID: account.id).first
+        XCTAssertEqual(record?.status, .uncertain)
+        // Checking again looks in Sent; it must not hand the draft to Gmail a second time.
+        _ = try await service.deliverPendingSend(draftID: pending.draftID, account: account)
+        XCTAssertEqual(server.sentDraftCount, 1)
+        record = try await service.pendingSends(accountID: account.id).first
+        XCTAssertEqual(record?.status, .uncertain)
+        let undo = try await service.cancelPendingSend(draftID: pending.draftID, account: account)
+        XCTAssertNil(undo)
+    }
+
+    func testDraftRemovedElsewhereFailsWithAClearReason() async throws {
+        let (service, _, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        let pending = try await queue(service, account)
+        server.failNextDraftSend(status: 404)
+        _ = try await service.deliverPendingSend(draftID: pending.draftID, account: account)
+        let record = try await service.pendingSends(accountID: account.id).first
+        XCTAssertEqual(record?.status, .failed)
+        XCTAssertEqual(record?.failure, PendingSendError.draftGone.errorDescription)
+    }
+
+    func testInterruptedBeforeHandoffIsHeldAndRetryStartsANewCountdown() async throws {
+        let (service, store, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        var pending = try await queue(service, account)
+        // A crash after marking it sending, before any request reached Gmail.
+        pending.status = .sending
+        try await store.save(pending, id: pending.draftID, collection: MailService.pendingCollection, accountID: account.id)
+        _ = try await service.deliverPendingSend(draftID: pending.draftID, account: account)
+        var record = try await service.pendingSends(accountID: account.id).first
+        XCTAssertEqual(record?.status, .failed)
+        XCTAssertEqual(server.sentDraftCount, 0)
+
+        let retry = try await service.reschedulePendingSend(draftID: pending.draftID, delay: 30, account: account)
+        XCTAssertEqual(retry?.status, .waiting)
+        XCTAssertGreaterThan(try XCTUnwrap(retry?.sendAt), .now.addingTimeInterval(20))
+        _ = try await service.deliverPendingSend(draftID: pending.draftID, account: account)
+        XCTAssertEqual(server.sentDraftCount, 1)
+
+        let late = try await queue(service, account)
+        try await service.holdPendingSend(draftID: late.draftID, reason: "Due while asleep", account: account)
+        record = try await service.pendingSends(accountID: account.id).first
+        XCTAssertEqual(record?.status, .failed)
+        let moved = try await service.cancelPendingSend(draftID: late.draftID, account: account)
+        XCTAssertNotNil(moved)
     }
 
     func testFirstSyncCachesSpamSoItCanBeBrowsed() async throws {

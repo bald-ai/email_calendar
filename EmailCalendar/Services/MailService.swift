@@ -66,6 +66,38 @@ struct MailDeliveryUncertainError: LocalizedError, Sendable {
     }
 }
 
+/// An email waiting out its Undo Send delay. The Gmail draft holds the whole email;
+/// this only says which draft to send and when, so a crash cannot lose its content.
+struct PendingSend: Codable, Sendable, Identifiable, Equatable {
+    enum Status: String, Codable, Sendable {
+        /// Counting down; Undo still works.
+        case waiting
+        /// Being handed to Gmail. Found after a crash, Gmail may or may not have it.
+        case sending
+        /// Definitely not sent; kept for review.
+        case failed
+        /// Gmail may have accepted it; look for it before any retry.
+        case uncertain
+    }
+    var draftID: String
+    var rfcMessageID: String
+    var threadID: String?
+    var subject: String
+    var recipients: [String]
+    var from: String?
+    var sendAt: Date
+    var status: Status = .waiting
+    var failure: String?
+    var id: String { draftID }
+}
+
+enum PendingSendError: LocalizedError {
+    case draftGone
+    var errorDescription: String? {
+        "This email was sent or deleted on another device during the countdown, so it wasn't sent from here."
+    }
+}
+
 private struct MailSendAttempt: Codable, Sendable {
     var rfcMessageID: String
     var startedAt: Date? = nil
@@ -233,6 +265,49 @@ actor MailService {
     @discardableResult
     func send(_ outgoing: OutgoingMessage, account: Account) async throws -> MailSendReceipt {
         try await serialized(accountID: account.id) { try await self.sendImpl(outgoing, account: account) }
+    }
+
+    static let pendingCollection = "pendingSends"
+
+    /// Saves the complete email as a Gmail draft, then schedules that draft to be sent after `delay`.
+    func queueSend(_ outgoing: OutgoingMessage, delay: TimeInterval, account: Account) async throws -> PendingSend {
+        try await serialized(accountID: account.id) { try await self.queueSendImpl(outgoing, delay: delay, account: account) }
+    }
+    func pendingSends(accountID: String) async throws -> [PendingSend] {
+        try await store.all(PendingSend.self, collection: Self.pendingCollection, accountID: accountID).sorted { $0.sendAt < $1.sendAt }
+    }
+    /// Undo, Review and Move to Drafts: stop tracking the email and leave its draft in Gmail.
+    /// Returns nil once it has been handed to Gmail, when it can no longer be taken back;
+    /// `includingUncertain` lets the person dismiss a send they have checked themselves.
+    func cancelPendingSend(draftID: String, includingUncertain: Bool = false, account: Account) async throws -> PendingSend? {
+        try await serialized(accountID: account.id) {
+            guard let pending = try await self.pendingSend(draftID, accountID: account.id),
+                  pending.status == .waiting || pending.status == .failed || (includingUncertain && pending.status == .uncertain) else { return nil }
+            try await self.store.remove(id: draftID, collection: Self.pendingCollection, accountID: account.id)
+            return pending
+        }
+    }
+    /// Retry after a definite failure: a fresh countdown, so it can still be undone.
+    func reschedulePendingSend(draftID: String, delay: TimeInterval, account: Account) async throws -> PendingSend? {
+        try await serialized(accountID: account.id) {
+            guard var pending = try await self.pendingSend(draftID, accountID: account.id), pending.status == .failed else { return nil }
+            pending.status = .waiting; pending.failure = nil; pending.sendAt = .now.addingTimeInterval(delay)
+            try await self.savePendingSend(pending, accountID: account.id)
+            return pending
+        }
+    }
+    /// Mail that was due while the Mac slept or the app was closed waits for review instead of going out late.
+    func holdPendingSend(draftID: String, reason: String, account: Account) async throws {
+        try await serialized(accountID: account.id) {
+            guard var pending = try await self.pendingSend(draftID, accountID: account.id), pending.status == .waiting else { return }
+            pending.status = .failed; pending.failure = reason
+            try await self.savePendingSend(pending, accountID: account.id)
+        }
+    }
+    /// Sends the draft, or after an interruption looks for it in Sent first. Returns nil when it was not
+    /// sent; the record then says why (failed or uncertain), or is gone because it was undone.
+    func deliverPendingSend(draftID: String, account: Account) async throws -> MailSendReceipt? {
+        try await serialized(accountID: account.id) { try await self.deliverPendingSendImpl(draftID: draftID, account: account) }
     }
 
     private func serialized<T: Sendable>(accountID: String, operation: @escaping @Sendable () async throws -> T) async throws -> T {
@@ -645,18 +720,95 @@ actor MailService {
             if let draftID = outgoing.draftID { sent = try await api.sendDraft(id: draftID) }
             else { sent = try await api.sendMessage(raw: raw, threadID: outgoing.threadID) }
         } catch {
-            let status = (error as? GoogleAPIError)?.statusCode
-            let neverConnected = (error as? URLError).map {
-                [URLError.notConnectedToInternet, .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost].contains($0.code)
-            } ?? false
-            if neverConnected || (status.map { (400..<500).contains($0) && $0 != 408 } ?? false) {
-                // An explicit rejection is safe to correct and retry.
+            if Self.isDefiniteRejection(error) {
                 try await store.removeMetadata(key: sendKey(outgoing), accountID: account.id)
                 throw error
             }
             return try await reconcileSend(attempt, outgoing: outgoing, account: account)
         }
         return await finishSend(sent, outgoing: outgoing, account: account)
+    }
+
+    private func pendingSend(_ draftID: String, accountID: String) async throws -> PendingSend? {
+        try await store.load(PendingSend.self, id: draftID, collection: Self.pendingCollection, accountID: accountID)
+    }
+
+    private func savePendingSend(_ pending: PendingSend, accountID: String) async throws {
+        try await store.save(pending, id: pending.draftID, collection: Self.pendingCollection, accountID: accountID, sortDate: pending.sendAt)
+    }
+
+    private func queueSendImpl(_ outgoing: OutgoingMessage, delay: TimeInterval, account: Account) async throws -> PendingSend {
+        guard !outgoing.to.isEmpty || !outgoing.cc.isEmpty || !outgoing.bcc.isEmpty else { throw MailError.noRecipients }
+        var outgoing = outgoing
+        if outgoing.rfcMessageID == nil { outgoing.rfcMessageID = "<\(UUID().uuidString.lowercased())@emailcalendar.local>" }
+        let saved = try await saveDraftImpl(outgoing, account: account)
+        guard let draftID = saved.draftID, let rfcMessageID = saved.rfcMessageID else { throw MailError.invalidDraft }
+        let pending = PendingSend(draftID: draftID, rfcMessageID: rfcMessageID, threadID: saved.threadID, subject: saved.subject,
+                                  recipients: saved.to + saved.cc + saved.bcc, from: saved.from, sendAt: .now.addingTimeInterval(delay))
+        try await savePendingSend(pending, accountID: account.id)
+        return pending
+    }
+
+    private func deliverPendingSendImpl(draftID: String, account: Account) async throws -> MailSendReceipt? {
+        try await prepare(account: account)
+        guard var pending = try await pendingSend(draftID, accountID: account.id), pending.status != .failed else { return nil }
+        // Identifies the draft's send attempt and its recipients; the content is already in Gmail.
+        let probe = OutgoingMessage(to: pending.recipients, draftID: pending.draftID, threadID: pending.threadID, rfcMessageID: pending.rfcMessageID)
+        let attempt = try await sendAttempt(probe, account: account)
+        if pending.status != .waiting && attempt == nil {
+            // Interrupted before it was handed to Gmail: definitely not sent.
+            pending.status = .failed; pending.failure = "The app closed before this email was sent."
+            try await savePendingSend(pending, accountID: account.id)
+            return nil
+        }
+        pending.status = .sending
+        try await savePendingSend(pending, accountID: account.id)
+        do {
+            let receipt: MailSendReceipt
+            if let earlier = attempt?.receipt { receipt = earlier }
+            else if let attempt { receipt = try await reconcileSend(attempt, outgoing: probe, account: account) }
+            else { receipt = try await sendDraftAsSaved(probe, account: account) }
+            try await store.remove(id: draftID, collection: Self.pendingCollection, accountID: account.id)
+            return receipt
+        } catch is MailDeliveryUncertainError {
+            pending.status = .uncertain; pending.failure = "Gmail may have sent this email, but its confirmation was lost."
+        } catch {
+            pending.status = .failed; pending.failure = error.localizedDescription
+        }
+        try await savePendingSend(pending, accountID: account.id)
+        return nil
+    }
+
+    /// Sends the Gmail draft exactly as saved, never recomposing it, with the same duplicate protection as `sendImpl`.
+    private func sendDraftAsSaved(_ probe: OutgoingMessage, account: Account) async throws -> MailSendReceipt {
+        guard let draftID = probe.draftID, let rfcMessageID = probe.rfcMessageID else { throw MailError.invalidDraft }
+        let attempt = MailSendAttempt(rfcMessageID: rfcMessageID, startedAt: .now, receipt: nil)
+        try await store.setMetadata(attempt, key: sendKey(probe), accountID: account.id)
+        let sent: GoogleMailMessage
+        do { sent = try await api.sendDraft(id: draftID) }
+        catch {
+            if (error as? GoogleAPIError)?.statusCode == 404 {
+                // Sent or deleted on another device. Sent from there with our marker counts as sent.
+                try await store.removeMetadata(key: sendKey(probe), accountID: account.id)
+                if let receipt = try? await reconcileSend(attempt, outgoing: probe, account: account) { return receipt }
+                throw PendingSendError.draftGone
+            }
+            if Self.isDefiniteRejection(error) {
+                try await store.removeMetadata(key: sendKey(probe), accountID: account.id)
+                throw error
+            }
+            return try await reconcileSend(attempt, outgoing: probe, account: account)
+        }
+        return await finishSend(sent, outgoing: probe, account: account)
+    }
+
+    /// An explicit rejection, or a request that never reached Google, is safe to correct and retry.
+    private static func isDefiniteRejection(_ error: Error) -> Bool {
+        let status = (error as? GoogleAPIError)?.statusCode
+        let neverConnected = (error as? URLError).map {
+            [URLError.notConnectedToInternet, .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost].contains($0.code)
+        } ?? false
+        return neverConnected || (status.map { (400..<500).contains($0) && $0 != 408 } ?? false)
     }
 
     private func sendKey(_ outgoing: OutgoingMessage) -> String {

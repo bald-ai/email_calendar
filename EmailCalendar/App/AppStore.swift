@@ -38,6 +38,17 @@ final class AppStore {
     var lastSyncedAt: Date?
     /// The current search was started from Spam and is limited to it.
     @ObservationIgnored private var searchIncludesSpam = false
+    /// Emails counting down to send (Undo Send), and ones that need review after a failure or crash.
+    var pendingSends: [PendingSend] = []
+    /// Interrupted sends being looked up in Gmail's Sent mail right now.
+    var checkingPendingSends: Set<String> = []
+    /// Shown briefly once Gmail confirms a pending email.
+    var sentConfirmation: SentConfirmation?
+    static let undoSendDelay: TimeInterval = 30
+    /// Mail due longer ago than this (the Mac slept, the app was closed) waits for review instead of going out late.
+    private static let overdueGrace: TimeInterval = 60
+    @ObservationIgnored private var pendingTimers: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var confirmationTask: Task<Void, Never>?
     /// Verified Gmail "Send mail as" addresses, the account's own first; the composer offers them as From.
     var sendAddresses: [String] = []
     @ObservationIgnored private var sendAddressesCheckedAt: Date?
@@ -241,6 +252,8 @@ final class AppStore {
         calendars = []; events = []; selectedThreadID = nil; selectedEventID = nil; openThreadID = nil; poweringThrough = false
         planner = PlannerSnapshot(); linkingThreadID = nil; plannerReveal = nil
         sendAddresses = []; sendAddressesCheckedAt = nil
+        for timer in pendingTimers.values { timer.cancel() }
+        pendingTimers = [:]; pendingSends = []; checkingPendingSends = []; sentConfirmation = nil
         searchTask?.cancel(); searchTask = nil; searchGeneration += 1; searchNextPageToken = nil; isSearching = false
         searchQuery = ""; undoMessage = nil; undoID = nil; undoFollowUp = nil; localUndo = nil; undoTask?.cancel()
         await mail?.cancelAllOperations()
@@ -402,7 +415,7 @@ final class AppStore {
             case .screenedOut: return labels.contains("HEY/Screened Out")
             case .spam: return thread.hasSpam
             case .sent: return labels.contains("SENT")
-            case .drafts: return labels.contains("DRAFT")
+            case .drafts: return labels.contains("DRAFT") && !thread.messages.contains { isPendingDraft($0.draftID) }
             case .allMail: return true
             case .calendar: return false
             }
@@ -569,20 +582,179 @@ final class AppStore {
     }
     func send(_ outgoing: OutgoingMessage) async throws {
         guard let account, let mail else { throw AppError.signInRequired }
-        // Keep the exact composer buffer before sending: a crash after Gmail accepts
-        // the message must reopen the same delivery identity, not create a new copy.
-        if let composition, var buffer = composition.session.recoveryBuffer, let database {
-            buffer.sendNeedsVerification = true
+        // Keep the composer buffer until the email is safely queued: a crash while saving reopens it.
+        if let composition, let buffer = composition.session.recoveryBuffer, let database {
             try await database.setMetadata(DraftRecovery(title: composition.title, buffer: buffer),
                                            key: DraftRecovery.metadataKey, accountID: account.id)
         }
-        let receipt = try await mail.send(outgoing, account: account)
-        if let warning = receipt.warning { errorMessage = warning }
-        do {
-            if !isQuitting { try await database?.removeMetadata(key: DraftRecovery.metadataKey, accountID: account.id) }
-            try await loadMailCache(accountID: account.id)
+        let pending: PendingSend
+        do { pending = try await mail.queueSend(outgoing, delay: Self.undoSendDelay, account: account) }
+        catch is MailDeliveryUncertainError {
+            // An earlier send of this draft was interrupted: look it up in Gmail, never send it again.
+            let receipt = try await mail.send(outgoing, account: account)
+            if let warning = receipt.warning { errorMessage = warning }
+            try? await database?.removeMetadata(key: DraftRecovery.metadataKey, accountID: account.id)
+            try? await loadMailCache(accountID: account.id)
+            return
         }
-        catch { errorMessage = "Message sent, but the local view could not refresh: \(error.localizedDescription)" }
+        guard self.account?.id == account.id else { return }
+        try? await database?.removeMetadata(key: DraftRecovery.metadataKey, accountID: account.id)
+        pendingSends.removeAll { $0.draftID == pending.draftID }
+        pendingSends.append(pending)
+        schedulePendingSend(pending, accountID: account.id)
+        do { try await loadMailCache(accountID: account.id) }
+        catch { errorMessage = "Email queued, but the local view could not refresh: \(error.localizedDescription)" }
+    }
+
+    // MARK: Undo Send
+
+    func isPendingDraft(_ draftID: String?) -> Bool {
+        guard let draftID else { return false }
+        return pendingSends.contains { $0.draftID == draftID }
+    }
+    /// Counting down, or being handed to Gmail.
+    var activePendingSends: [PendingSend] { pendingSends.filter { $0.status == .waiting || $0.status == .sending } }
+    /// Not sent, or not known to be sent: these need a decision.
+    var unresolvedPendingSends: [PendingSend] { pendingSends.filter { $0.status == .failed || $0.status == .uncertain } }
+
+    func undoPendingSend(_ draftID: String) async {
+        guard let mail, let account else { return }
+        pendingTimers[draftID]?.cancel(); pendingTimers[draftID] = nil
+        do {
+            let undone = try await mail.cancelPendingSend(draftID: draftID, account: account)
+            await reloadPendingSends(accountID: account.id)
+            guard undone != nil else { errorMessage = "Too late to undo: this email is already being sent."; return }
+            // While quitting, the email just stays in Drafts.
+            if !isQuitting { await openDraft(draftID: draftID) }
+        } catch { reportError(error) }
+    }
+    func sendPendingNow(_ draftID: String) async {
+        guard let account else { return }
+        pendingTimers[draftID]?.cancel()
+        await deliverPendingSend(draftID: draftID, accountID: account.id, now: true)
+    }
+    /// After a definite failure: a fresh countdown, so it can still be undone.
+    func retryPendingSend(_ draftID: String) async {
+        guard let mail, let account else { return }
+        do {
+            if let pending = try await mail.reschedulePendingSend(draftID: draftID, delay: Self.undoSendDelay, account: account) {
+                schedulePendingSend(pending, accountID: account.id)
+            }
+        } catch { reportError(error) }
+        await reloadPendingSends(accountID: account.id)
+    }
+    /// Looks in Gmail's Sent mail again for an email whose confirmation was lost.
+    func checkPendingSend(_ draftID: String) async {
+        guard let account, !checkingPendingSends.contains(draftID) else { return }
+        checkingPendingSends.insert(draftID)
+        defer { checkingPendingSends.remove(draftID) }
+        await deliverPendingSend(draftID: draftID, accountID: account.id)
+    }
+    /// Stops tracking it; the email stays in Drafts. For an uncertain send, only after the person has checked.
+    func dismissPendingSend(_ draftID: String) async {
+        guard let mail, let account else { return }
+        pendingTimers[draftID]?.cancel(); pendingTimers[draftID] = nil
+        do { _ = try await mail.cancelPendingSend(draftID: draftID, includingUncertain: true, account: account) }
+        catch { reportError(error) }
+        await reloadPendingSends(accountID: account.id)
+    }
+
+    /// Opens a Gmail draft in the composer with its attachments, as Edit Draft does.
+    func openDraft(draftID: String) async {
+        guard let account else { return }
+        try? await loadMailCache(accountID: account.id)
+        guard let message = cachedThreads.lazy.flatMap(\.messages).first(where: { $0.draftID == draftID }) else {
+            navigation = .drafts; errorMessage = "The email is in Drafts."; return
+        }
+        do {
+            let full = try await fullMessage(message)
+            var request = MailComposition.draft(full, accountEmail: accountEmail)
+            for attachment in full.attachments {
+                let data = try await attachmentData(attachment, message: full)
+                request.message.attachments.append(OutgoingAttachment(name: attachment.name, mimeType: attachment.mimeType, data: data))
+            }
+            guard self.account?.id == account.id else { return }
+            if navigation == .calendar { navigation = .imbox }
+            replaceComposition(with: request)
+        } catch { reportError(error) }
+    }
+
+    /// The draft message behind a pending email, for its read-only preview.
+    func pendingDraftMessage(_ draftID: String) -> MailMessage? {
+        cachedThreads.lazy.flatMap(\.messages).first { $0.draftID == draftID }
+    }
+
+    private func reloadPendingSends(accountID: String) async {
+        guard let mail, account?.id == accountID else { return }
+        do {
+            let loaded = try await mail.pendingSends(accountID: accountID)
+            if account?.id == accountID { pendingSends = loaded }
+        } catch { reportError(error) }
+    }
+
+    /// At launch and sign-in: resume countdowns, hold overdue mail, and look up sends a crash interrupted.
+    private func resumePendingSends(accountID: String) async {
+        await reloadPendingSends(accountID: accountID)
+        for pending in pendingSends {
+            switch pending.status {
+            case .waiting: schedulePendingSend(pending, accountID: accountID)
+            case .sending, .uncertain: Task { await checkPendingSend(pending.draftID) }
+            case .failed: break
+            }
+        }
+    }
+
+    private func schedulePendingSend(_ pending: PendingSend, accountID: String) {
+        pendingTimers[pending.draftID]?.cancel()
+        pendingTimers[pending.draftID] = Task { [weak self] in
+            let wait = pending.sendAt.timeIntervalSinceNow
+            if wait > 0 { do { try await Task.sleep(for: .seconds(wait)) } catch { return } }
+            await self?.deliverPendingSend(draftID: pending.draftID, accountID: accountID)
+        }
+    }
+
+    private func deliverPendingSend(draftID: String, accountID: String, now: Bool = false) async {
+        pendingTimers[draftID] = nil
+        guard let mail, let account, account.id == accountID,
+              let index = pendingSends.firstIndex(where: { $0.draftID == draftID }) else { return }
+        let pending = pendingSends[index]
+        if pending.status == .waiting, !now, Date.now.timeIntervalSince(pending.sendAt) > Self.overdueGrace {
+            do {
+                try await mail.holdPendingSend(draftID: draftID,
+                    reason: "It was due while the Mac was asleep or the app was closed, so it wasn't sent.", account: account)
+            } catch { reportError(error) }
+            await reloadPendingSends(accountID: accountID)
+            return
+        }
+        if pending.status == .waiting { pendingSends[index].status = .sending }
+        do {
+            if let receipt = try await mail.deliverPendingSend(draftID: draftID, account: account) {
+                if let warning = receipt.warning { errorMessage = warning }
+                confirmSent(subject: pending.subject, threadID: receipt.threadID)
+                try? await loadMailCache(accountID: accountID)
+            }
+        } catch { reportError(error) }
+        await reloadPendingSends(accountID: accountID)
+        if pending.status == .waiting, let after = pendingSends.first(where: { $0.draftID == draftID }), after.status == .failed || after.status == .uncertain {
+            errorMessage = "“\(pending.subject.isEmpty ? "(no subject)" : pending.subject)” wasn’t sent. It’s waiting for you at the top of the Imbox."
+        }
+    }
+
+    private func confirmSent(subject: String, threadID: String) {
+        sentConfirmation = SentConfirmation(subject: subject, threadID: threadID)
+        confirmationTask?.cancel()
+        confirmationTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(6)) } catch { return }
+            self?.sentConfirmation = nil
+        }
+    }
+
+    /// Quit waits for countdowns to end (or Send now / Undo) and for Gmail to confirm; failures stay saved.
+    private func finishPendingSends() async {
+        let deadline = (activePendingSends.map(\.sendAt).max() ?? .now).addingTimeInterval(90)
+        while !activePendingSends.isEmpty, Date.now < deadline {
+            do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+        }
     }
     func attachmentData(_ attachment: MailAttachment, message: MailMessage) async throws -> Data {
         guard account?.id == message.accountID else { throw CancellationError() }
@@ -673,17 +845,19 @@ final class AppStore {
 
     func prepareToQuit() async -> Bool {
         isQuitting = true
-        guard let composition else { return true }
-        do {
-            guard let database, let accountID = composition.accountID ?? account?.id else { throw AppError.draftStorageUnavailable }
-            try await DraftTermination.preserve(composition.session, title: composition.title, accountID: accountID, store: database)
-            composition.session.cancel()
-            return true
-        } catch {
-            isQuitting = false
-            reportError(error)
-            return false
+        if let composition {
+            do {
+                guard let database, let accountID = composition.accountID ?? account?.id else { throw AppError.draftStorageUnavailable }
+                try await DraftTermination.preserve(composition.session, title: composition.title, accountID: accountID, store: database)
+                composition.session.cancel()
+            } catch {
+                isQuitting = false
+                reportError(error)
+                return false
+            }
         }
+        await finishPendingSends()
+        return true
     }
 
     private func restoreDraft() async {
@@ -739,6 +913,7 @@ final class AppStore {
                 sendAddresses = cached
             }
         } catch { reportError(error) }
+        await resumePendingSends(accountID: account.id)
     }
     private func loadMailCache(accountID: String) async throws {
         guard account?.id == accountID else { return }
@@ -800,5 +975,11 @@ enum AppError: LocalizedError {
         case .draftStorageUnavailable: "The draft could not be saved locally. Keep the app open and try again."
         }
     }
+}
+/// "Sent" with a link to the sent copy, shown briefly after Gmail confirms a pending email.
+struct SentConfirmation: Equatable {
+    var subject: String
+    var threadID: String
+    var id = UUID()
 }
 #endif

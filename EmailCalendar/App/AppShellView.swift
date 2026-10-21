@@ -38,6 +38,12 @@ struct AppShellView: View {
         .animation(.easeOut(duration: 0.14), value: showsMenu)
         .foregroundStyle(Theme.text)
         .disabled(store.isQuitting)
+        // Outside the disabled shell, so pending emails can still be previewed, sent or undone while quitting.
+        .overlay(alignment: .bottom) {
+            if store.isSignedIn {
+                PendingSendBar().padding(.bottom, store.navigation == .calendar ? 20 : 140).padding(.horizontal, 24)
+            }
+        }
         .background(MailKeyboardMonitor(enabled: store.isSignedIn, handle: handleShellKey).frame(width: 0, height: 0))
         .onAppear { store.openWindow = { openWindow(id: "main") } }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in

@@ -15,8 +15,9 @@ struct MailThreadView: View {
     private var replyTarget: MailMessage? {
         thread.messages.filter { !$0.labels.contains("DRAFT") && $0.draftID == nil }.max { $0.date < $1.date }
     }
+    /// A draft counting down to send is edited through Undo, not here.
     private var draft: MailMessage? {
-        thread.messages.filter { $0.labels.contains("DRAFT") || $0.draftID != nil }.max { $0.date < $1.date }
+        thread.messages.filter { ($0.labels.contains("DRAFT") || $0.draftID != nil) && !store.isPendingDraft($0.draftID) }.max { $0.date < $1.date }
     }
     private var participants: [MailAddress] {
         var seen = Set<String>()
@@ -151,7 +152,7 @@ extension MailMessage {
     }
 }
 
-private struct MailMessageCard: View {
+struct MailMessageCard: View {
     @Environment(AppStore.self) private var store
     var message: MailMessage
     var isLatest = false
