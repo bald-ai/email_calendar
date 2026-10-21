@@ -55,7 +55,10 @@ public enum MIMEComposer {
         headers.append("MIME-Version: 1.0")
         var content = headers.joined(separator: "\r\n") + "\r\n"
 
-        if outgoing.attachments.isEmpty {
+        // Images and quotes only exist in HTML, even in a recovered plain-text draft.
+        if outgoing.isHTML || !outgoing.inlineImages.isEmpty || outgoing.quote != nil {
+            content += try richBody(outgoing)
+        } else if outgoing.attachments.isEmpty {
             content += "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n"
             content += base64Lines(Data(normalizedNewlines(outgoing.body).utf8)) + "\r\n"
         } else {
@@ -77,6 +80,43 @@ public enum MIMEComposer {
         // Gmail's raw-message API has a 35 MB upload limit, including MIME overhead.
         guard result.count <= 35 * 1_024 * 1_024 else { throw MIMEComposerError.oversizedMessage }
         return result
+    }
+
+    /// mixed { alternative { text/plain, related { text/html, inline images } }, attachments }, leaving out empty layers.
+    private static func richBody(_ outgoing: OutgoingMessage) throws -> String {
+        let images = outgoing.inlineImages.filter { $0.contentID != nil } + (outgoing.quote?.images ?? [])
+        let plain = RichBody.plainText(body: outgoing.body, images: outgoing.inlineImages) + (outgoing.quote.map { "\n\n" + $0.text } ?? "")
+        let html = RichBody.document(body: outgoing.body, images: outgoing.inlineImages, quote: outgoing.quote)
+        let htmlPart = leaf("text/html; charset=utf-8", Data(html.utf8))
+        let htmlBlock = images.isEmpty ? htmlPart : multipart("related", [htmlPart] + (try images.map(inlinePart)))
+        let alternative = multipart("alternative", [leaf("text/plain; charset=utf-8", Data(normalizedNewlines(plain).utf8)), htmlBlock])
+        if outgoing.attachments.isEmpty { return alternative }
+        return multipart("mixed", [alternative] + (try outgoing.attachments.map(attachmentPart)))
+    }
+
+    /// A body part: its headers, a blank line and base64 content.
+    private static func leaf(_ type: String, _ data: Data, headers extra: [String] = []) -> String {
+        (["Content-Type: \(type)"] + extra + ["Content-Transfer-Encoding: base64"]).joined(separator: "\r\n")
+            + "\r\n\r\n" + base64Lines(data) + "\r\n"
+    }
+
+    private static func multipart(_ subtype: String, _ parts: [String]) -> String {
+        let boundary = "EmailCalendar-\(subtype)-\(UUID().uuidString)"
+        return "Content-Type: multipart/\(subtype); boundary=\"\(boundary)\"\r\n\r\n"
+            + parts.map { "--\(boundary)\r\n" + $0 }.joined() + "--\(boundary)--\r\n"
+    }
+
+    private static func attachmentPart(_ attachment: OutgoingAttachment) throws -> String {
+        try validateHeader(attachment.name, field: "attachment name")
+        guard isMIMEType(attachment.mimeType) else { throw MIMEComposerError.invalidHeader("attachment MIME type") }
+        return leaf(attachment.mimeType, attachment.data, headers: ["Content-Disposition: attachment;\r\n \(filenameParameter(attachment.name))"])
+    }
+
+    private static func inlinePart(_ image: OutgoingAttachment) throws -> String {
+        try validateHeader(image.name, field: "image name")
+        guard isMIMEType(image.mimeType), let id = image.contentID else { throw MIMEComposerError.invalidHeader("image type") }
+        try validateMessageID("<\(id)>")
+        return leaf(image.mimeType, image.data, headers: ["Content-Disposition: inline;\r\n \(filenameParameter(image.name))", "Content-ID: <\(id)>"])
     }
 
     private static func validateHeader(_ text: String, field: String) throws {

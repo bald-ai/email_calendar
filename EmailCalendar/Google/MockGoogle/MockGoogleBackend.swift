@@ -249,7 +249,7 @@ public final class MockGoogleBackend: @unchecked Sendable {
                                   attachments: parsed.attachments.map { attachment in
                                       state.idCounter += 1
                                       return MockAttachment(id: "att\(state.idCounter)", filename: attachment.filename,
-                                                            mimeType: attachment.mimeType, data: attachment.data)
+                                                            mimeType: attachment.mimeType, data: attachment.data, contentID: attachment.contentID)
                                   })
         state.messages[id] = message
         recordHistory(message)
@@ -322,7 +322,8 @@ public final class MockGoogleBackend: @unchecked Sendable {
         }
         let content = GoogleMailPart(partId: "0", mimeType: "multipart/alternative", filename: "", headers: [], body: GoogleMailBody(size: 0), parts: bodyParts)
         let attachments = message.attachments.enumerated().map { index, attachment in
-            GoogleMailPart(partId: "\(index + 1)", mimeType: attachment.mimeType, filename: attachment.filename, headers: [],
+            GoogleMailPart(partId: "\(index + 1)", mimeType: attachment.mimeType, filename: attachment.filename,
+                           headers: attachment.contentID.map { [GoogleMailHeader(name: "Content-ID", value: "<\($0)>")] } ?? [],
                            body: GoogleMailBody(attachmentId: attachment.id, size: attachment.data.count))
         }
         let payload = GoogleMailPart(partId: "", mimeType: "multipart/mixed", filename: "", headers: message.headers,

@@ -8,6 +8,8 @@ struct MailComposition: Identifiable {
     let id = UUID()
     var title: String
     var accountID: String?
+    /// Shown above the editor, e.g. when a draft's formatting had to be simplified.
+    var notice: String?
     let session: DraftSession
     var message: OutgoingMessage {
         get { session.message }
@@ -24,11 +26,12 @@ struct MailComposition: Identifiable {
         session = DraftSession(recovering: recovery.buffer)
     }
 
-    static var newMessage: MailComposition { MailComposition(title: "New message", message: OutgoingMessage()) }
+    static var newMessage: MailComposition { MailComposition(title: "New message", message: OutgoingMessage(isHTML: true)) }
 
     /// `sendAddresses` are the account's verified send-as addresses: none of them gets a copy of the reply,
     /// and the reply goes out from the one the original involved (mail forwarded from another address included).
-    static func reply(to original: MailMessage, accountEmail: String, sendAddresses: [String], all: Bool) -> MailComposition {
+    /// `data` holds the original's downloaded attachments by attachment ID, for the images its quote shows.
+    static func reply(to original: MailMessage, accountEmail: String, sendAddresses: [String], all: Bool, data: [String: Data] = [:]) -> MailComposition {
         let own = Set(([accountEmail] + sendAddresses).map { $0.lowercased() })
         let primary = own.contains(original.from.email.lowercased()) ? original.to.map(\.email) : (original.replyTo.isEmpty ? [original.from.email] : original.replyTo.map(\.email))
         let recipients = all ? primary + original.to.map(\.email) : primary
@@ -37,24 +40,53 @@ struct MailComposition: Identifiable {
         let cc = all ? unique(original.cc.map(\.email).filter { !own.contains($0.lowercased()) && !to.map { $0.lowercased() }.contains($0.lowercased()) }) : []
         var references = original.references
         if let messageID = original.rfcMessageID, !references.contains(messageID) { references.append(messageID) }
+        let header = "On \(original.date.formatted(date: .abbreviated, time: .shortened)), \(original.from.formatted) wrote:"
+        let quote = RichBody.replyQuote(header: header, originalHTML: original.html, originalText: text(of: original),
+                                        images: quotedImages(original, data: data))
         return MailComposition(title: all ? "Reply all" : "Reply", message: OutgoingMessage(
-            to: to, cc: cc, subject: prefixed(original.subject, prefix: "Re:"), body: "\n\n" + quote(original),
+            to: to, cc: cc, subject: prefixed(original.subject, prefix: "Re:"),
             threadID: original.threadID, inReplyTo: original.rfcMessageID, references: references,
-            from: SendIdentity.address(for: original, addresses: sendAddresses, accountEmail: accountEmail)))
+            from: SendIdentity.address(for: original, addresses: sendAddresses, accountEmail: accountEmail),
+            isHTML: true, quote: quote))
     }
 
-    static func forward(_ original: MailMessage, accountEmail: String, sendAddresses: [String]) -> MailComposition {
-        MailComposition(title: "Forward", message: OutgoingMessage(subject: prefixed(original.subject, prefix: "Fwd:"), body: "\n\n" + quote(original),
-            from: SendIdentity.address(for: original, addresses: sendAddresses, accountEmail: accountEmail)))
+    static func forward(_ original: MailMessage, accountEmail: String, sendAddresses: [String], data: [String: Data] = [:]) -> MailComposition {
+        var header = ["---------- Forwarded message ---------", "From: \(original.from.formatted)",
+                      "Date: \(original.date.formatted(date: .abbreviated, time: .shortened))", "Subject: \(original.subject)",
+                      "To: \(original.to.map(\.formatted).joined(separator: ", "))"]
+        if !original.cc.isEmpty { header.append("Cc: \(original.cc.map(\.formatted).joined(separator: ", "))") }
+        let quote = RichBody.forwardQuote(headerLines: header, originalHTML: original.html, originalText: text(of: original),
+                                          images: quotedImages(original, data: data))
+        let inline = Set(quote.images.compactMap(\.contentID))
+        return MailComposition(title: "Forward", message: OutgoingMessage(subject: prefixed(original.subject, prefix: "Fwd:"),
+            attachments: OutgoingAttachment.files(of: original, data: data, excluding: inline),
+            from: SendIdentity.address(for: original, addresses: sendAddresses, accountEmail: accountEmail),
+            isHTML: true, quote: quote))
     }
 
-    static func draft(_ original: MailMessage, accountEmail: String) -> MailComposition {
-        MailComposition(title: "Draft", message: OutgoingMessage(to: original.to.map(\.email), cc: original.cc.map(\.email),
-            bcc: original.bcc.map(\.email), subject: original.subject, body: original.plainText.isEmpty ? (original.html.map(plainText(from:)) ?? "") : original.plainText,
-            draftID: original.draftID, threadID: original.threadID,
-            inReplyTo: original.inReplyTo, references: original.references,
-            rfcMessageID: original.rfcMessageID ?? "<\(UUID().uuidString.lowercased())@emailcalendar.local>",
-            from: original.from.email.isEmpty || original.from.email.lowercased() == accountEmail.lowercased() ? nil : original.from.email))
+    /// Reopens a draft: its text and images become editable again, and a quoted original is kept as it was.
+    static func draft(_ original: MailMessage, accountEmail: String, data: [String: Data] = [:]) -> MailComposition {
+        let reopened = OutgoingMessage.reopening(original, accountEmail: accountEmail, data: data)
+        var composition = MailComposition(title: "Draft", message: reopened.message)
+        if reopened.simplified { composition.notice = "Some formatting in this draft can’t be shown here, so it was simplified to plain text." }
+        return composition
+    }
+
+    /// Attachment IDs whose bytes a reply, forward or reopened draft needs.
+    static func neededAttachments(_ original: MailMessage, action: MailComposeAction) -> [MailAttachment] {
+        let referenced = Set(original.html.map(RichBody.contentIDs(in:)) ?? [])
+        switch action {
+        case .reply, .replyAll: return original.attachments.filter { $0.contentID.map(referenced.contains) ?? false }
+        case .forward, .editDraft: return original.attachments
+        }
+    }
+
+    private static func text(of original: MailMessage) -> String {
+        original.plainText.isEmpty ? (original.html.map(plainText(from:)) ?? original.snippet) : original.plainText
+    }
+
+    private static func quotedImages(_ original: MailMessage, data: [String: Data]) -> [OutgoingAttachment] {
+        (original.html.map(RichBody.contentIDs(in:)) ?? []).compactMap { OutgoingAttachment.inlineImage($0, of: original, data: data) }
     }
 
     private static func unique(_ addresses: [String]) -> [String] {
@@ -64,13 +96,6 @@ struct MailComposition: Identifiable {
 
     private static func prefixed(_ subject: String, prefix: String) -> String {
         subject.lowercased().hasPrefix(prefix.lowercased()) ? subject : "\(prefix) \(subject)"
-    }
-
-    private static func quote(_ original: MailMessage) -> String {
-        let text = original.plainText.isEmpty ? (original.html.map(plainText(from:)) ?? original.snippet) : original.plainText
-        return "On \(original.date.formatted(date: .abbreviated, time: .shortened)), \(original.from.formatted) wrote:\n" +
-            text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-                .components(separatedBy: "\n").map { "> \($0)" }.joined(separator: "\n")
     }
 
     /// Convert HTML-only mail for quoting without starting an HTML importer that
@@ -101,6 +126,10 @@ struct MailComposerView: View {
     private var savedAt: Date? { draft.savedAt }
     @State private var showsMoreRecipients: Bool
     @State private var showsImporter = false
+    /// The file picker adds attachments, or images placed in the text at the cursor.
+    @State private var importsImages = false
+    @State private var showsQuote = false
+    @State private var editor = RichTextController()
     @State private var isClosing = false
     @State private var errorText: String?
     @FocusState private var focus: Field?
@@ -127,6 +156,9 @@ struct MailComposerView: View {
                         if isSaving { ProgressView().controlSize(.small); Text("Saving…").font(.caption).foregroundStyle(Theme.secondary) }
                         else if let savedAt { Text("Draft saved \(savedAt, style: .time)").font(.caption).foregroundStyle(Theme.secondary) }
                     }.padding(.bottom, 18)
+                    if let notice = composition.notice {
+                        Label(notice, systemImage: "info.circle").font(.callout).foregroundStyle(Theme.secondary).padding(.bottom, 12)
+                    }
                     TextField("", text: $draft.message.subject, prompt: Text("Subject").foregroundStyle(Theme.secondary.opacity(0.6)), axis: .vertical)
                         .textFieldStyle(.plain).font(.system(size: 30, weight: .bold)).padding(.bottom, 16)
                     VStack(spacing: 10) {
@@ -143,10 +175,9 @@ struct MailComposerView: View {
                     }
                     .padding(.horizontal, 14).padding(.vertical, 12)
                     .background(Theme.raised, in: RoundedRectangle(cornerRadius: 12))
-                    TextEditor(text: $draft.message.body)
-                        .font(.system(size: 15)).lineSpacing(3).scrollContentBackground(.hidden).focused($focus, equals: .body)
-                        .scrollDisabled(true)
-                        .frame(minHeight: 320).padding(.top, 18)
+                    RichTextEditor(text: $draft.message.body, images: $draft.message.inlineImages, controller: editor,
+                                   initialFocus: !to.isEmpty, onFiles: { addAttachments($0) })
+                        .padding(.top, 18)
                     if !message.attachments.isEmpty {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), alignment: .leading)], alignment: .leading, spacing: 8) {
                             ForEach(message.attachments) { attachment in
@@ -163,6 +194,28 @@ struct MailComposerView: View {
                                 }.font(.system(size: 13)).padding(10).background(Theme.raised, in: RoundedRectangle(cornerRadius: 10))
                             }
                         }.padding(.top, 10)
+                    }
+                    if let quote = message.quote {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 14) {
+                                Button { showsQuote.toggle() } label: {
+                                    Label(showsQuote ? "Hide quoted message" : "Show quoted message", systemImage: "text.quote")
+                                }
+                                Button("Remove") { draft.message.quote = nil }.help("Send without the quoted message")
+                            }.buttonStyle(QuietButtonStyle()).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.secondary)
+                            // Plain text only: the original's HTML (and its remote images) is never loaded while writing.
+                            if showsQuote {
+                                Text(quote.text).font(.system(size: 13)).foregroundStyle(Theme.secondary).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }.padding(.top, 14)
+                    }
+                    if message.totalAttachmentBytes > 0 {
+                        let total = message.totalAttachmentBytes
+                        Text(total > Self.sizeLimit
+                             ? "\(Self.size(total)) of images and attachments, over Gmail’s 25 MB limit. Remove an image or attachment to send."
+                             : "\(Self.size(total)) of 25 MB")
+                            .font(.caption).foregroundStyle(total > Self.sizeLimit ? Theme.no : Theme.secondary).padding(.top, 10)
                     }
                     if let errorText = errorText ?? draft.errorText {
                         Text(errorText).font(.callout).foregroundStyle(Theme.no).padding(.top, 10)
@@ -190,7 +243,11 @@ struct MailComposerView: View {
                 .buttonStyle(PillButtonStyle(fill: canSend ? Theme.accent : Theme.accent.opacity(0.4)))
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!canSend || isSending || isSaving)
-                Button { showsImporter = true } label: { Label("Attach", systemImage: "paperclip") }
+                Button { importsImages = true; showsImporter = true } label: { Label("Image", systemImage: "photo") }
+                    .buttonStyle(PillButtonStyle(fill: .white.opacity(0.1)))
+                    .disabled(draft.sendNeedsVerification)
+                    .help("Put an image in the text at the cursor. You can also paste (⌘V) or drop one.")
+                Button { importsImages = false; showsImporter = true } label: { Label("Attach", systemImage: "paperclip") }
                     .buttonStyle(PillButtonStyle(fill: .white.opacity(0.1)))
                     .disabled(draft.sendNeedsVerification)
                 Button { Task { await save(close: true) } } label: { Label("Save & close", systemImage: "tray.and.arrow.down") }
@@ -217,25 +274,34 @@ struct MailComposerView: View {
                 try await store.send(outgoing)
             })
         }
-        .fileImporter(isPresented: $showsImporter, allowedContentTypes: [.data], allowsMultipleSelection: true) { result in
+        .fileImporter(isPresented: $showsImporter, allowedContentTypes: importsImages ? [.image] : [.data], allowsMultipleSelection: true) { result in
             do {
                 let urls = try result.get()
-                var additions: [OutgoingAttachment] = []
-                var totalBytes = message.attachments.reduce(0) { $0 + $1.data.count }
-                for url in urls {
-                    let accessed = url.startAccessingSecurityScopedResource()
-                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-                    let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                    guard size <= 25_000_000 - totalBytes else { errorText = "Attachments must total less than 25 MB."; return }
-                    let data = try Data(contentsOf: url)
-                    totalBytes += data.count
-                    guard totalBytes <= 25_000_000 else { errorText = "Attachments must total less than 25 MB."; return }
-                    additions.append(OutgoingAttachment(name: url.lastPathComponent,
-                        mimeType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream", data: data))
-                }
-                draft.message.attachments += additions
+                if importsImages { editor.insertImages(from: urls); editor.focus() } else { addAttachments(urls) }
             } catch { errorText = error.localizedDescription }
         }
+    }
+
+    private static let sizeLimit = 25_000_000
+    private static func size(_ bytes: Int) -> String { ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
+
+    private func addAttachments(_ urls: [URL]) {
+        do {
+            var additions: [OutgoingAttachment] = []
+            var totalBytes = message.totalAttachmentBytes
+            for url in urls {
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                guard size <= Self.sizeLimit - totalBytes else { errorText = "Images and attachments must total less than 25 MB."; return }
+                let data = try Data(contentsOf: url)
+                totalBytes += data.count
+                guard totalBytes <= Self.sizeLimit else { errorText = "Images and attachments must total less than 25 MB."; return }
+                additions.append(OutgoingAttachment(name: url.lastPathComponent,
+                    mimeType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream", data: data))
+            }
+            draft.message.attachments += additions
+        } catch { errorText = error.localizedDescription }
     }
 
     /// The account's send-as addresses, plus a draft's own From if Gmail no longer lists it.

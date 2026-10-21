@@ -145,8 +145,28 @@ public struct OutgoingAttachment: Codable, Sendable, Identifiable, Equatable {
     public var name: String
     public var mimeType: String
     public var data: Data
-    public init(id: String = UUID().uuidString, name: String, mimeType: String, data: Data) {
+    /// Set for an image shown inside the email body, which refers to it as `cid:<contentID>`.
+    public var contentID: String?
+    /// The width the image is shown at, in points; the full-resolution pixels are still sent.
+    public var displayWidth: Int?
+    public init(id: String = UUID().uuidString, name: String, mimeType: String, data: Data,
+                contentID: String? = nil, displayWidth: Int? = nil) {
         self.id = id; self.name = name; self.mimeType = mimeType; self.data = data
+        self.contentID = contentID; self.displayWidth = displayWidth
+    }
+}
+
+/// The quoted original of a reply or forward. It is added below the new text when the email is
+/// saved or sent, and is never rendered while writing, so its remote images cannot load.
+public struct MailQuote: Codable, Sendable, Equatable {
+    /// A complete `gmail_quote` block, with scripts, forms and event handlers removed.
+    public var html: String
+    /// The same quote for the plain-text copy of the email.
+    public var text: String
+    /// Inline images the quoted HTML refers to, with their original Content-IDs.
+    public var images: [OutgoingAttachment]
+    public init(html: String, text: String, images: [OutgoingAttachment] = []) {
+        self.html = html; self.text = text; self.images = images
     }
 }
 
@@ -165,14 +185,43 @@ public struct OutgoingMessage: Codable, Sendable, Equatable {
     public var references: [String]
     /// A verified Gmail "Send mail as" address; nil sends from the account's own address.
     public var from: String?
+    /// Sent as HTML with a plain-text copy. The body then marks each inline image with
+    /// `RichBody.imageMarker`, in the order of `inlineImages`. False sends plain text only.
+    public var isHTML: Bool
+    public var inlineImages: [OutgoingAttachment]
+    public var quote: MailQuote?
     public init(to: [String] = [], cc: [String] = [], bcc: [String] = [], subject: String = "", body: String = "",
                 attachments: [OutgoingAttachment] = [], draftID: String? = nil, threadID: String? = nil,
                 inReplyTo: String? = nil, references: [String] = [],
-                rfcMessageID: String? = "<\(UUID().uuidString.lowercased())@emailcalendar.local>", from: String? = nil) {
+                rfcMessageID: String? = "<\(UUID().uuidString.lowercased())@emailcalendar.local>", from: String? = nil,
+                isHTML: Bool = false, inlineImages: [OutgoingAttachment] = [], quote: MailQuote? = nil) {
         self.to = to; self.cc = cc; self.bcc = bcc; self.subject = subject; self.body = body
         self.attachments = attachments; self.draftID = draftID; self.threadID = threadID
         self.inReplyTo = inReplyTo; self.references = references
         self.rfcMessageID = rfcMessageID; self.from = from
+        self.isHTML = isHTML; self.inlineImages = inlineImages; self.quote = quote
+    }
+
+    /// Recovery copies saved before HTML email existed have no format fields.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rfcMessageID = try c.decodeIfPresent(String.self, forKey: .rfcMessageID)
+        to = try c.decode([String].self, forKey: .to); cc = try c.decode([String].self, forKey: .cc)
+        bcc = try c.decode([String].self, forKey: .bcc)
+        subject = try c.decode(String.self, forKey: .subject); body = try c.decode(String.self, forKey: .body)
+        attachments = try c.decode([OutgoingAttachment].self, forKey: .attachments)
+        draftID = try c.decodeIfPresent(String.self, forKey: .draftID); threadID = try c.decodeIfPresent(String.self, forKey: .threadID)
+        inReplyTo = try c.decodeIfPresent(String.self, forKey: .inReplyTo)
+        references = try c.decode([String].self, forKey: .references)
+        from = try c.decodeIfPresent(String.self, forKey: .from)
+        isHTML = try c.decodeIfPresent(Bool.self, forKey: .isHTML) ?? false
+        inlineImages = try c.decodeIfPresent([OutgoingAttachment].self, forKey: .inlineImages) ?? []
+        quote = try c.decodeIfPresent(MailQuote.self, forKey: .quote)
+    }
+
+    /// Everything that travels with the email, for the size shown while writing.
+    public var totalAttachmentBytes: Int {
+        (attachments + inlineImages + (quote?.images ?? [])).reduce(0) { $0 + $1.data.count }
     }
 }
 

@@ -49,6 +49,8 @@ struct MockAttachment: Codable {
     var filename: String
     var mimeType: String
     var data: Data
+    /// Inline images keep their Content-ID so the HTML's `cid:` references still resolve.
+    var contentID: String? = nil
 }
 
 struct MockHistory: Codable {
@@ -154,7 +156,7 @@ enum MockMIME {
         var headers: [GoogleMailHeader] = []
         var plain = ""
         var html: String?
-        var attachments: [(filename: String, mimeType: String, data: Data)] = []
+        var attachments: [(filename: String, mimeType: String, data: Data, contentID: String?)] = []
     }
 
     static func parse(_ data: Data) -> Parsed {
@@ -172,7 +174,8 @@ enum MockMIME {
         if mime.hasPrefix("multipart/"), let boundary = parameter("boundary", contentType) {
             for segment in body.components(separatedBy: "--\(boundary)").dropFirst() {
                 if segment.hasPrefix("--") { break }
-                let part = segment.hasPrefix("\r\n") ? String(segment.dropFirst(2)) : segment
+                // "\r\n" is a single Character in Swift, so drop one, not two.
+                let part = segment.first?.isNewline == true ? String(segment.dropFirst()) : segment
                 let (partHeaders, partBody) = split(part)
                 collect(headers: partHeaders, body: partBody, into: &parsed)
             }
@@ -187,7 +190,8 @@ enum MockMIME {
         }
         let disposition = value("Content-Disposition", headers) ?? ""
         if let filename = parameter("filename", disposition) ?? parameter("name", contentType) {
-            parsed.attachments.append((filename, mime, decoded))
+            let contentID = value("Content-ID", headers)?.trimmingCharacters(in: CharacterSet(charactersIn: "<> "))
+            parsed.attachments.append((filename, mime, decoded, contentID))
         } else if mime == "text/html" {
             parsed.html = String(decoding: decoded, as: UTF8.self)
         } else {

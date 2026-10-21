@@ -361,6 +361,21 @@ final class AppStore {
         } catch { if generation == searchGeneration { reportError(error) } }
     }
 
+    /// A reply, forward or reopened draft, with the attachments and images it carries over downloaded.
+    func composition(for message: MailMessage, action: MailComposeAction) async throws -> MailComposition {
+        let full = try await fullMessage(message)
+        var data: [String: Data] = [:]
+        for attachment in MailComposition.neededAttachments(full, action: action) where attachment.inlineData == nil {
+            data[attachment.id] = try await attachmentData(attachment, message: full)
+        }
+        switch action {
+        case .reply, .replyAll:
+            return .reply(to: full, accountEmail: accountEmail, sendAddresses: sendAddresses, all: action == .replyAll, data: data)
+        case .forward: return .forward(full, accountEmail: accountEmail, sendAddresses: sendAddresses, data: data)
+        case .editDraft: return .draft(full, accountEmail: accountEmail, data: data)
+        }
+    }
+
     func fullMessage(_ message: MailMessage) async throws -> MailMessage {
         guard message.needsBodyHydration else { return message }
         guard let mail, let account else { throw AppError.signInRequired }
@@ -667,12 +682,7 @@ final class AppStore {
             navigation = .drafts; errorMessage = "The email is in Drafts."; return
         }
         do {
-            let full = try await fullMessage(message)
-            var request = MailComposition.draft(full, accountEmail: accountEmail)
-            for attachment in full.attachments {
-                let data = try await attachmentData(attachment, message: full)
-                request.message.attachments.append(OutgoingAttachment(name: attachment.name, mimeType: attachment.mimeType, data: data))
-            }
+            let request = try await composition(for: message, action: .editDraft)
             guard self.account?.id == account.id else { return }
             if navigation == .calendar { navigation = .imbox }
             replaceComposition(with: request)
