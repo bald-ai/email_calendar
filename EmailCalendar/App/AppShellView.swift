@@ -24,7 +24,7 @@ struct AppShellView: View {
                     } else if store.navigation == .calendar {
                         page(maxWidth: 1180) { CalendarMainView() }
                     } else {
-                        MailRootView(searchFocus: { beginSearch() })
+                        MailWorkspace(searchFocus: { beginSearch() })
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -37,6 +37,7 @@ struct AppShellView: View {
         }
         .animation(.easeOut(duration: 0.14), value: showsMenu)
         .foregroundStyle(Theme.text)
+        .disabled(store.isQuitting)
         .background(MailKeyboardMonitor(enabled: store.isSignedIn, handle: handleShellKey).frame(width: 0, height: 0))
         .onAppear { store.openWindow = { openWindow(id: "main") } }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -79,6 +80,7 @@ struct AppShellView: View {
                     }.buttonStyle(QuietButtonStyle()).help("Search (/)")
                 }
                 Spacer()
+                if store.isSignedIn && store.navigation != .calendar { drawerToggles }
                 if store.isSignedIn { accountMenu }
             }
             if store.isSignedIn {
@@ -95,6 +97,30 @@ struct AppShellView: View {
             }
         }
         .padding(.horizontal, 26).frame(height: 54)
+    }
+
+    /// Days and To-do: which drawer is beside mail. Same as ← / → or a two-finger swipe.
+    private var drawerToggles: some View {
+        HStack(spacing: 2) {
+            drawerToggle(side: 1, symbol: "calendar", title: "Days", key: "←")
+            drawerToggle(side: -1, symbol: "checklist", title: "To-do", key: "→")
+        }
+        .padding(2)
+        .background(Theme.raised, in: Capsule())
+    }
+
+    private func drawerToggle(side: Int, symbol: String, title: String, key: String) -> some View {
+        let isOn = store.drawerPosition == side
+        return Button { withAnimation(MailWorkspace.settle) { store.toggleDrawer(side) } } label: {
+            Image(systemName: symbol).font(.system(size: 13, weight: .semibold))
+                .frame(width: 32, height: 24)
+                .background(isOn ? Theme.card : .clear, in: Capsule())
+                .foregroundStyle(isOn ? Theme.text : Theme.secondary)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("\(isOn ? "Hide" : "Show") \(title) (\(key))")
+        .accessibilityLabel(title).accessibilityAddTraits(isOn ? .isSelected : [])
     }
 
     private var showsBack: Bool {

@@ -32,9 +32,22 @@ final class AppStore {
     var isSearching = false
     var searchNextPageToken: String?
     var isSigningIn = false
+    var isQuitting = false
     var errorMessage: String?
     var undoMessage: String?
     var lastSyncedAt: Date?
+    /// To-dos and the links between email threads and events or to-dos.
+    var planner = PlannerSnapshot()
+    /// The drawer beside mail: 1 shows Days, -1 shows To-do, 0 shows mail alone.
+    var drawerPosition: Int {
+        didSet { UserDefaults.standard.set(drawerPosition, forKey: "drawer.position") }
+    }
+    /// The thread waiting to be linked: the next event or to-do clicked gets it.
+    var linkingThreadID: String?
+    /// Asks a drawer to scroll to one event or to-do and highlight it.
+    var plannerReveal: PlannerReveal?
+    /// Asks the To-do drawer to focus its add field.
+    var todoFieldRequest: UUID?
     var overlayHeight: Double {
         didSet { UserDefaults.standard.set(overlayHeight, forKey: "overlayHeight") }
     }
@@ -61,11 +74,16 @@ final class AppStore {
     @ObservationIgnored private let database: LocalStore?
     @ObservationIgnored private let mail: MailService?
     @ObservationIgnored private let calendarService: CalendarService?
+    @ObservationIgnored let plannerService: PlannerService?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private var hasStarted = false
     @ObservationIgnored private var isResettingDemo = false
     @ObservationIgnored private var undoTask: Task<Void, Never>?
     @ObservationIgnored private var undoID: UUID?
+    /// Runs after a mail undo succeeds, for actions that also changed local data (Move to To-do).
+    @ObservationIgnored var undoFollowUp: (@MainActor () async -> Void)?
+    /// An undo that is purely local (a deleted to-do, a removed link); used when there is no mail token.
+    @ObservationIgnored private var localUndo: (@MainActor () async -> Void)?
     private var cachedThreads: [MailThread] = []
     @ObservationIgnored private var replacingComposition = false
     @ObservationIgnored private var mailSnapshotOrder = MailSnapshotOrder()
@@ -88,6 +106,8 @@ final class AppStore {
         overlayHeight = defaults.object(forKey: "overlayHeight") as? Double ?? 0.375
         bubbleNotifications = defaults.object(forKey: "bubbleNotifications") as? Bool ?? true
         launchAtLogin = defaults.object(forKey: "launchAtLogin") as? Bool ?? true
+        // First launch shows mail alone; after that the drawers come back the way they were left.
+        drawerPosition = max(-1, min(1, defaults.object(forKey: "drawer.position") as? Int ?? 0))
         let forced = ProcessInfo.processInfo.environment["EC_MOCK"]
         isDemoMode = forced.map { $0 == "1" } ?? ((try? GoogleOAuthConfiguration.fromBundle()) == nil)
         do {
@@ -116,8 +136,9 @@ final class AppStore {
             database = local
             mail = MailService(api: api, store: local)
             calendarService = CalendarService(api: api, store: local)
+            plannerService = PlannerService(store: local)
         } catch {
-            database = nil; mail = nil; calendarService = nil
+            database = nil; mail = nil; calendarService = nil; plannerService = nil
             errorMessage = error.localizedDescription
         }
     }
@@ -134,7 +155,7 @@ final class AppStore {
 
     /// Demo mode: start over with fresh seed data, relative to today.
     func resetDemoData() {
-        guard isDemoMode, !isResettingDemo else { return }
+        guard isDemoMode, !isResettingDemo, !isQuitting else { return }
         isResettingDemo = true
         let previousAccount = account
         account = nil
@@ -171,6 +192,7 @@ final class AppStore {
             catch { reportError(error) }
         }
         await loadCache()
+        await restoreDraft()
         await configureLoginItem()
         if bubbleNotifications && account != nil { await requestNotificationPermission() }
         if let account, let mail {
@@ -178,6 +200,7 @@ final class AppStore {
             catch { reportError(error) }
         }
         await refresh()
+        await seedDemoPlannerIfNeeded()
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(60)) } catch { return }
@@ -187,7 +210,7 @@ final class AppStore {
     }
 
     func signIn() async {
-        guard !isSigningIn, !isDemoMode else { return }
+        guard !isSigningIn, !isDemoMode, !isQuitting else { return }
         isSigningIn = true
         do {
             account = try await auth.signIn()
@@ -197,20 +220,22 @@ final class AppStore {
         } catch { isSigningIn = false; reportError(error); return }
         isSigningIn = false
         await loadCache()
+        await restoreDraft()
         if bubbleNotifications { await requestNotificationPermission() }
         await refresh()
     }
 
     func signOut() async {
-        guard !isSigningIn, !isDemoMode else { return }
+        guard !isSigningIn, !isDemoMode, !isQuitting else { return }
         isSigningIn = true
         defer { isSigningIn = false }
         // Stop new UI and polling work before draining operations tied to these credentials.
         composition?.session.cancel(); composition = nil
         account = nil; threads = []; cachedThreads = []; senderRules = []; remoteImageSenders = []
         calendars = []; events = []; selectedThreadID = nil; selectedEventID = nil; openThreadID = nil; poweringThrough = false
+        planner = PlannerSnapshot(); linkingThreadID = nil; plannerReveal = nil
         searchTask?.cancel(); searchTask = nil; searchGeneration += 1; searchNextPageToken = nil; isSearching = false
-        searchQuery = ""; undoMessage = nil; undoID = nil; undoTask?.cancel()
+        searchQuery = ""; undoMessage = nil; undoID = nil; undoFollowUp = nil; localUndo = nil; undoTask?.cancel()
         await mail?.cancelAllOperations()
         await calendarService?.cancelAllOperations()
         do {
@@ -319,7 +344,9 @@ final class AppStore {
     }
 
     func replaceComposition(with next: MailComposition) {
-        guard !replacingComposition, composition?.session.isSending != true else { return }
+        guard !isQuitting, !replacingComposition, composition?.session.isSending != true else { return }
+        var next = next
+        next.accountID = account?.id
         let previous = composition, accountID = account?.id
         replacingComposition = true
         Task {
@@ -416,9 +443,10 @@ final class AppStore {
         return senderRuleIndex.rule(for: address)?.decision
     }
 
-    func archive(_ thread: MailThread) async {
-        guard account?.id == thread.accountID else { return }
-        await performMailAction { mail, account in try await mail.archive(threadID: thread.id, account: account) }
+    @discardableResult
+    func archive(_ thread: MailThread) async -> Bool {
+        guard account?.id == thread.accountID else { return false }
+        return await performMailAction { mail, account in try await mail.archive(threadID: thread.id, account: account) }
     }
     func trash(_ thread: MailThread) async {
         guard account?.id == thread.accountID else { return }
@@ -445,25 +473,74 @@ final class AppStore {
         }
     }
     func undo() async {
+        if undoID == nil, let localUndo {
+            self.localUndo = nil; undoMessage = nil; undoTask?.cancel()
+            await localUndo()
+            return
+        }
         guard let undoID, let account, let mail else { return }
         do {
             try await mail.undo(tokenID: undoID, account: account)
             self.undoID = nil; undoMessage = nil; undoTask?.cancel()
+            if let followUp = undoFollowUp { undoFollowUp = nil; await followUp() }
             try await loadMailCache(accountID: account.id)
+        } catch { reportError(error) }
+    }
+
+    /// Shows the undo bar for a change that only touched local data.
+    func offerUndo(_ message: String, _ undo: @escaping @MainActor () async -> Void) {
+        undoID = nil; undoFollowUp = nil; localUndo = undo; undoMessage = message
+        scheduleUndoExpiry()
+    }
+
+    private func scheduleUndoExpiry() {
+        undoTask?.cancel()
+        undoTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            self?.undoMessage = nil; self?.undoID = nil; self?.undoFollowUp = nil; self?.localUndo = nil
+        }
+    }
+
+    /// A thread from the current list or the full cache, for links to mail that left the list.
+    func thread(id: String) -> MailThread? {
+        threads.first { $0.id == id } ?? cachedThreads.first { $0.id == id }
+    }
+
+    func openLinkedThread(id: String) async {
+        if let thread = thread(id: id) { open(thread); return }
+        guard let account, let mail else { return }
+        do {
+            let thread = try await mail.fetchThread(id: id, account: account)
+            guard self.account?.id == account.id else { return }
+            try await loadMailCache(accountID: account.id)
+            open(thread)
         } catch { reportError(error) }
     }
     func saveDraft(_ outgoing: OutgoingMessage) async throws -> OutgoingMessage {
         guard let account, let mail else { throw AppError.signInRequired }
         let result = try await mail.saveDraft(outgoing, account: account)
-        do { try await loadMailCache(accountID: account.id) }
+        do {
+            if !isQuitting { try await database?.removeMetadata(key: DraftRecovery.metadataKey, accountID: account.id) }
+            try await loadMailCache(accountID: account.id)
+        }
         catch { errorMessage = "Draft saved to Gmail, but the local view could not refresh: \(error.localizedDescription)" }
         return result
     }
     func send(_ outgoing: OutgoingMessage) async throws {
         guard let account, let mail else { throw AppError.signInRequired }
+        // Keep the exact composer buffer before sending: a crash after Gmail accepts
+        // the message must reopen the same delivery identity, not create a new copy.
+        if let composition, var buffer = composition.session.recoveryBuffer, let database {
+            buffer.sendNeedsVerification = true
+            try await database.setMetadata(DraftRecovery(title: composition.title, buffer: buffer),
+                                           key: DraftRecovery.metadataKey, accountID: account.id)
+        }
         let receipt = try await mail.send(outgoing, account: account)
         if let warning = receipt.warning { errorMessage = warning }
-        do { try await loadMailCache(accountID: account.id) }
+        do {
+            if !isQuitting { try await database?.removeMetadata(key: DraftRecovery.metadataKey, accountID: account.id) }
+            try await loadMailCache(accountID: account.id)
+        }
         catch { errorMessage = "Message sent, but the local view could not refresh: \(error.localizedDescription)" }
     }
     func attachmentData(_ attachment: MailAttachment, message: MailMessage) async throws -> Data {
@@ -549,23 +626,48 @@ final class AppStore {
         errorMessage = error.localizedDescription
         if !isDemoMode && account != nil && !auth.isSignedIn {
             account = nil; threads = []; cachedThreads = []; calendars = []; events = []
-            senderRules = []; remoteImageSenders = []; selectedThreadID = nil
+            senderRules = []; remoteImageSenders = []; selectedThreadID = nil; planner = PlannerSnapshot()
         }
     }
 
-    private func performMailAction(_ action: (MailService, Account) async throws -> MailUndoToken) async {
-        guard let mail, let account else { return }
+    func prepareToQuit() async -> Bool {
+        isQuitting = true
+        guard let composition else { return true }
+        do {
+            guard let database, let accountID = composition.accountID ?? account?.id else { throw AppError.draftStorageUnavailable }
+            try await DraftTermination.preserve(composition.session, title: composition.title, accountID: accountID, store: database)
+            composition.session.cancel()
+            return true
+        } catch {
+            isQuitting = false
+            reportError(error)
+            return false
+        }
+    }
+
+    private func restoreDraft() async {
+        guard composition == nil, let account, let database else { return }
+        do {
+            if let recovery = try await database.metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: account.id),
+               self.account?.id == account.id {
+                composition = MailComposition(recovery: recovery, accountID: account.id)
+                navigation = .imbox
+            }
+        } catch { reportError(error) }
+    }
+
+    @discardableResult
+    func performMailAction(_ action: (MailService, Account) async throws -> MailUndoToken) async -> Bool {
+        guard let mail, let account else { return false }
         do {
             let token = try await action(mail, account)
-            guard self.account?.id == account.id else { return }
-            undoID = token.id; undoMessage = token.message
-            undoTask?.cancel()
-            undoTask = Task { [weak self] in
-                do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                self?.undoMessage = nil; self?.undoID = nil
-            }
+            guard self.account?.id == account.id else { return false }
+            undoID = token.id; undoMessage = token.message; undoFollowUp = nil; localUndo = nil
+            if let warning = token.warning { errorMessage = warning }
+            scheduleUndoExpiry()
             try await loadMailCache(accountID: account.id)
-        } catch { reportError(error) }
+            return true
+        } catch { reportError(error); return false }
     }
     private func apply(_ snapshot: MailSnapshot) {
         guard let account, mailSnapshotOrder.accept(revision: snapshot.revision, accountID: account.id) else { return }
@@ -591,6 +693,7 @@ final class AppStore {
         do {
             try await loadMailCache(accountID: account.id)
             try await loadCalendarCache(accountID: account.id)
+            try await loadPlanner(accountID: account.id)
         } catch { reportError(error) }
     }
     private func loadMailCache(accountID: String) async throws {
@@ -645,11 +748,12 @@ final class AppStore {
 }
 
 enum AppError: LocalizedError {
-    case signInRequired, messageNoLongerAvailable
+    case signInRequired, messageNoLongerAvailable, draftStorageUnavailable
     var errorDescription: String? {
         switch self {
         case .signInRequired: "Sign in with Google to continue."
         case .messageNoLongerAvailable: "This message is no longer available. Reopen the thread before composing a reply or draft."
+        case .draftStorageUnavailable: "The draft could not be saved locally. Keep the app open and try again."
         }
     }
 }

@@ -15,11 +15,11 @@ private final class RegressionRegistry: @unchecked Sendable {
 private final class RegressionTransport: @unchecked Sendable {
     private let lock = NSLock()
     private var requests: [URLRequest] = []
-    let response: @Sendable (URLRequest) -> (Int, Data)
-    init(_ response: @escaping @Sendable (URLRequest) -> (Int, Data)) { self.response = response }
-    func handle(_ request: URLRequest) -> (Int, Data) {
+    let response: @Sendable (URLRequest) throws -> (Int, Data)
+    init(_ response: @escaping @Sendable (URLRequest) throws -> (Int, Data)) { self.response = response }
+    func handle(_ request: URLRequest) throws -> (Int, Data) {
         lock.withLock { requests.append(request) }
-        return response(request)
+        return try response(request)
     }
     func recorded() -> [URLRequest] { lock.withLock { requests } }
 }
@@ -34,11 +34,13 @@ private final class RegressionProtocol: URLProtocol, @unchecked Sendable {
         guard let fixture = Self.registry.get(token), let url = request.url else {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL)); return
         }
-        let (status, data) = fixture.handle(request)
-        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: data)
-        client?.urlProtocolDidFinishLoading(self)
+        do {
+            let (status, data) = try fixture.handle(request)
+            let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
     }
     override func stopLoading() {}
 }
@@ -68,7 +70,7 @@ private struct RegressionContext {
     let directory: URL
     let session: URLSession
     let key: String
-    init(pauseAt: Int? = nil, response: @escaping @Sendable (URLRequest) -> (Int, Data)) throws {
+    init(pauseAt: Int? = nil, response: @escaping @Sendable (URLRequest) throws -> (Int, Data)) throws {
         key = UUID().uuidString
         token = RegressionToken(key, pauseAt: pauseAt)
         transport = RegressionTransport(response)
@@ -235,12 +237,120 @@ struct LifecycleRegressions {
         let session = DraftSession(message: OutgoingMessage())
         session.to = #""Doe, Jane" <jane@example.com>; "Operations; Europe" <ops@example.com>, plain@example.com"#
         #expect(session.outgoing.to.count == 3)
+        #expect(session.canSend)
         let raw = try MIMEComposer.compose(session.outgoing, from: "owner@example.com")
         let source = String(decoding: raw, as: UTF8.self)
         #expect(source.contains(#""Doe, Jane" <jane@example.com>"#))
         #expect(source.contains(#""Operations; Europe" <ops@example.com>"#))
         #expect(MailMapping.addresses(session.outgoing.to.joined(separator: ",")).map(\.email)
                 == ["jane@example.com", "ops@example.com", "plain@example.com"])
+        session.cc = "Jane Doe <jane@example.com>"
+        #expect(session.canSend)
+        session.bcc = "incomplete@"
+        #expect(!session.canSend)
+        session.bcc = "bad space@example.com"
+        #expect(!session.canSend)
+        session.bcc = "recipient@example.com\r\nBcc: hidden@example.com"
+        #expect(!session.canSend)
+        session.to = ""; session.cc = ""; session.bcc = ""
+        #expect(!session.canSend)
+    }
+
+    @Test @MainActor func quitFlushesRecentEditsWithoutWaitingForTheDebounce() async throws {
+        let context = try RegressionContext { _ in json("{}") }
+        defer { context.cleanup() }
+        let recorder = DraftSaveRecorder()
+        let session = DraftSession(message: OutgoingMessage(to: ["jane@example.com"], body: "Old", draftID: "one-draft"), delay: .seconds(60))
+        session.configure(save: { try await recorder.save($0) }, send: { _ in })
+        session.message.body = "Edited immediately before Quit"
+        try await DraftTermination.preserve(session, title: "Reply", accountID: "owner", store: context.store)
+        #expect(await recorder.values.last?.body == "Edited immediately before Quit")
+        #expect(try await context.store.metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: "owner") == nil)
+        session.cancel()
+    }
+
+    @Test @MainActor func failedQuitSaveRecoversTheExactBufferAndAttachmentsAcrossRelaunch() async throws {
+        let context = try RegressionContext { _ in json("{}") }
+        defer { context.cleanup() }
+        let attachment = OutgoingAttachment(name: "notes.txt", mimeType: "text/plain", data: Data("Notes".utf8))
+        let session = DraftSession(message: OutgoingMessage(body: "Unsaved reply", attachments: [attachment], draftID: "existing-draft"), delay: .seconds(60))
+        session.to = #""Doe, Jane" <jane@example.com>; unfinished@"#
+        session.cc = "Operations <ops@example.com>"
+        session.bcc = "private@example.com"
+        session.configure(save: { _ in throw URLError(.notConnectedToInternet) }, send: { _ in })
+        try await DraftTermination.preserve(session, title: "Reply", accountID: "owner", store: context.store)
+        let reopened = try LocalStore(url: context.directory.appendingPathComponent("cache.sqlite"))
+        let recovery = try #require(try await reopened.metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: "owner"))
+        #expect(recovery.title == "Reply")
+        #expect(recovery.buffer == session.recoveryBuffer)
+        #expect(try await reopened.metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: "other-account") == nil)
+        session.cancel()
+        let restored = DraftSession(recovering: recovery.buffer, delay: .seconds(60))
+        restored.to = "jane@example.com"
+        var saved: OutgoingMessage?
+        restored.configure(save: { saved = $0; return $0 }, send: { _ in })
+        try await DraftTermination.preserve(restored, title: recovery.title, accountID: "owner", store: reopened)
+        #expect(saved?.body == "Unsaved reply")
+        #expect(saved?.attachments == [attachment])
+        #expect(saved?.draftID == "existing-draft")
+        #expect(try await reopened.metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: "owner") == nil)
+        restored.cancel()
+    }
+
+    @Test @MainActor func quitWaitsForAnInFlightSaveAndKeepsItsAssignedDraftIDOnFailure() async throws {
+        let context = try RegressionContext { _ in json("{}") }
+        defer { context.cleanup() }
+        var firstStarted = false, attempts = 0
+        let session = DraftSession(message: OutgoingMessage(to: ["jane@example.com"], body: "First"), delay: .seconds(60))
+        session.configure(save: { value in
+            attempts += 1
+            if attempts > 1 { throw URLError(.notConnectedToInternet) }
+            firstStarted = true
+            try await Task.sleep(for: .milliseconds(30))
+            var saved = value; saved.draftID = "created-before-quit"
+            return saved
+        }, send: { _ in })
+        let flush = Task { try await session.flush() }
+        while !firstStarted { await Task.yield() }
+        session.message.body = "Newer edits"
+        try await DraftTermination.preserve(session, title: "New message", accountID: "owner", store: context.store)
+        _ = try? await flush.value
+        let recovery = try #require(try await context.store.metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: "owner"))
+        #expect(recovery.buffer.message.draftID == "created-before-quit")
+        #expect(recovery.buffer.message.body == "Newer edits")
+        session.cancel()
+    }
+
+    @Test @MainActor func quittingDuringSendDoesNotRecoverAnAlreadySentMessage() async throws {
+        let context = try RegressionContext { _ in json("{}") }
+        defer { context.cleanup() }
+        var started = false, saves = 0, sent = false
+        let session = DraftSession(message: OutgoingMessage(to: ["jane@example.com"], body: "Sending now"), delay: .seconds(60))
+        session.configure(save: { value in saves += 1; return value }, send: { _ in
+            started = true
+            try await Task.sleep(for: .milliseconds(30))
+            sent = true
+        })
+        let send = Task { try await session.send() }
+        while !started { await Task.yield() }
+        try await DraftTermination.preserve(session, title: "New message", accountID: "owner", store: context.store)
+        try await send.value
+        #expect(sent && saves == 0)
+        #expect(session.recoveryBuffer == nil)
+        #expect(try await context.store.metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: "owner") == nil)
+        session.cancel()
+    }
+
+    @Test @MainActor func quittingBeforeTheComposerAppearsStillKeepsTheRecoveredBuffer() async throws {
+        let context = try RegressionContext { _ in json("{}") }
+        defer { context.cleanup() }
+        let buffer = DraftSession.Buffer(message: OutgoingMessage(body: "Recovered edits", draftID: "existing-draft"),
+                                         to: "jane@example.com", cc: "", bcc: "")
+        let session = DraftSession(recovering: buffer)
+        // No view has configured a Gmail saver yet.
+        try await DraftTermination.preserve(session, title: "Reply", accountID: "owner", store: context.store)
+        #expect(try await context.store.metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: "owner")?.buffer == buffer)
+        session.cancel()
     }
 
     @Test @MainActor func sendClaimsTheSessionBeforeWaitingForAnAutosave() async throws {
@@ -360,6 +470,45 @@ struct LifecycleRegressions {
 
 @Suite("Calendar write and cache regressions")
 struct CalendarStorageRegressions {
+    @Test func movingAWeeklySeriesChangesTheExpandedWeekday() async throws {
+        let backend = MockGoogleBackend(fileURL: nil)
+        let context = try RegressionContext { request in
+            let response = backend.handle(request); return (response.status, response.body)
+        }
+        defer { context.cleanup() }
+        let accountID = MockGoogleBackend.accountEmail
+        let service = CalendarService(api: context.api, store: context.store)
+        try await service.sync(accountID: accountID)
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(identifier: "UTC")!
+        let start = calendar.nextDate(after: .now, matching: DateComponents(hour: 9, minute: 0, weekday: 3), matchingPolicy: .nextTime)!
+        let title = "Tuesday to Wednesday regression"
+        _ = try await service.create(CalendarEvent(id: "", calendarID: accountID, accountID: accountID, title: title,
+            start: start, end: start.addingTimeInterval(3600), recurrence: ["RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=4"], timeZone: "UTC"))
+        let original = try #require(try await service.cachedEvents(accountID: accountID).first { $0.title == title })
+        var edit = original
+        edit.start = calendar.date(byAdding: .day, value: 1, to: original.start)!
+        edit.end = calendar.date(byAdding: .day, value: 1, to: original.end)!
+        _ = try await service.update(edit, scope: .allEvents, originalEvent: original)
+        let occurrences = try await service.cachedEvents(accountID: accountID).filter { $0.title == title }
+        #expect(occurrences.count == 4)
+        #expect(occurrences.first?.start == edit.start)
+        #expect(occurrences.allSatisfy { calendar.component(.weekday, from: $0.start) == 4 })
+        let patch = try #require(context.transport.recorded().last { $0.httpMethod == "PATCH" })
+        let payload = try JSONSerialization.jsonObject(with: patch.httpBody!) as! [String: Any]
+        #expect(payload["recurrence"] as? [String] == ["RRULE:FREQ=WEEKLY;BYDAY=WE;COUNT=4"])
+    }
+
+    @Test func weeklyDayShiftsPreserveIntervalsAndRotateEverySelectedDay() {
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(identifier: "Europe/Prague")!
+        let monday = CalendarDates.day("2026-10-19", calendar: calendar)!
+        let sunday = CalendarDates.day("2026-10-18", calendar: calendar)!
+        let rules = ["RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE,FR;COUNT=8", "EXDATE;VALUE=DATE:20261019"]
+        #expect(RepeatRule.shiftingWeeklyDays(rules, from: monday, to: sunday, calendar: calendar)
+            == ["RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=SU,TU,TH;COUNT=8", rules[1]])
+        #expect(RepeatRule.shiftingWeeklyDays(rules, from: monday, to: monday.addingTimeInterval(3600), calendar: calendar) == rules)
+        #expect(RepeatRule.shiftingWeeklyDays(["RRULE:FREQ=WEEKLY;COUNT=8"], from: monday, to: sunday, calendar: calendar)
+            == ["RRULE:FREQ=WEEKLY;COUNT=8"])
+    }
     @Test func removingRecurrenceSendsAnExplicitEmptyArray() async throws {
         let original = GoogleEvent(id: "series", summary: "Repeating", start: GoogleEventDateTime(dateTime: "2026-10-13T09:00:00Z"),
                                    end: GoogleEventDateTime(dateTime: "2026-10-13T10:00:00Z"), recurrence: ["RRULE:FREQ=DAILY"])
@@ -501,6 +650,89 @@ struct CalendarStorageRegressions {
 
 @Suite("Mail queue, search, and body regressions")
 struct MailRegressions {
+    @Test func bubbleTimerSurvivesARefreshFailureAfterGmailAcceptsTheMove() async throws {
+        let backend = MockGoogleBackend(fileURL: nil)
+        let failure = BubbleRefreshFailure(backend: backend)
+        let context = try RegressionContext { try failure.handle($0) }
+        defer { context.cleanup() }
+        let account = Account(id: MockGoogleBackend.accountEmail, email: MockGoogleBackend.accountEmail)
+        let service = MailService(api: context.api, store: context.store)
+        _ = try await service.sync(account: account)
+        let due = Date.now.addingTimeInterval(3600)
+        failure.arm()
+        let token = try await service.bubbleUp(threadID: "t-bank", date: due, account: account)
+        #expect(token.warning != nil)
+        let hidden = try #require(try await service.cached(accountID: account.id).threads.first { $0.id == "t-bank" })
+        #expect(hidden.labels.contains("HEY/Bubble Up") && !hidden.labels.contains("INBOX"))
+        #expect(hidden.bubbleUpAt == due)
+        let reopened = try LocalStore(url: context.directory.appendingPathComponent("cache.sqlite"))
+        let timer = try #require(try await reopened.load(BubbleRecord.self, id: "t-bank", collection: "bubbles", accountID: account.id))
+        #expect(timer.dueAt == due && timer.surfacedAt == nil)
+        let restarted = MailService(api: context.api, store: reopened)
+        let surfaced = try await restarted.processDueBubbles(account: account, now: due.addingTimeInterval(1))
+        #expect(surfaced.map(\.id) == ["t-bank"])
+        #expect(surfaced.first?.labels.contains("INBOX") == true)
+        #expect(try await restarted.processDueBubbles(account: account, now: due.addingTimeInterval(2)).isEmpty)
+    }
+
+    @Test func failedBubbleMutationRestoresThePreviousTimer() async throws {
+        let backend = MockGoogleBackend(fileURL: nil)
+        let failure = BubbleRefreshFailure(backend: backend)
+        let context = try RegressionContext { try failure.handle($0) }
+        defer { context.cleanup() }
+        let account = Account(id: MockGoogleBackend.accountEmail, email: MockGoogleBackend.accountEmail)
+        let service = MailService(api: context.api, store: context.store)
+        _ = try await service.sync(account: account)
+        let originalDue = Date.now.addingTimeInterval(3600)
+        _ = try await service.bubbleUp(threadID: "t-bank", date: originalDue, account: account)
+        failure.arm(rejectMutation: true)
+        await #expect(throws: GoogleAPIError.self) {
+            _ = try await service.bubbleUp(threadID: "t-bank", date: originalDue.addingTimeInterval(3600), account: account)
+        }
+        #expect(try await context.store.load(BubbleRecord.self, id: "t-bank", collection: "bubbles", accountID: account.id)?.dueAt == originalDue)
+    }
+
+    @Test func anExpiredHistoryRebuildRefreshesOldLinkedMailAndPrunesUnlinkedMail() async throws {
+        let past = Int64(Date.now.addingTimeInterval(-100 * 86400).timeIntervalSince1970 * 1000)
+        let raw = """
+        {"id":"old-linked","messages":[{"id":"m-old","threadId":"old-linked","internalDate":"\(past)","labelIds":[],"payload":{"mimeType":"text/plain","headers":[{"name":"From","value":"jane@example.com"},{"name":"Subject","value":"Old project"}],"body":{"data":"\(Data("Updated on Gmail".utf8).base64URL)"}}}]}
+        """
+        let labelData = try JSONEncoder().encode(["labels": [
+            GoogleLabel(id: "aside", name: "HEY/Set Aside"), GoogleLabel(id: "bubble", name: "HEY/Bubble Up"),
+            GoogleLabel(id: "screen", name: "HEY/Screener"), GoogleLabel(id: "out", name: "HEY/Screened Out")
+        ]])
+        let context = try RegressionContext { request in
+            switch request.url!.lastPathComponent {
+            case "labels": (200, labelData)
+            case "profile": json(#"{"emailAddress":"owner@example.com","historyId":"fresh"}"#)
+            case "history": (404, Data(#"{"error":{"message":"Expired history"}}"#.utf8))
+            case "old-linked": json(raw)
+            default: json("{}")
+            }
+        }
+        defer { context.cleanup() }
+        let account = Account(id: "owner@example.com", email: "owner@example.com")
+        for id in ["old-linked", "old-unlinked"] {
+            let thread = MailThread(id: id, accountID: account.id, messages: [
+                MailMessage(id: "m-\(id)", threadID: id, accountID: account.id, from: MailAddress(email: "jane@example.com"),
+                            date: Date(timeIntervalSince1970: Double(past) / 1000), plainText: "Stale cache")
+            ])
+            try await context.store.save(thread, id: id, collection: "threads", accountID: account.id)
+        }
+        try await context.store.setMetadata("expired", key: "mailHistoryID", accountID: account.id)
+        let planner = PlannerService(store: context.store)
+        let todo = TodoItem(title: "Finish the project")
+        try await planner.save(todo, accountID: account.id)
+        let link = MailLink(threadID: "old-linked", target: .todo(todo.id), subject: "Old project", senderName: "Jane",
+                            senderEmail: "jane@example.com", targetTitle: todo.title)
+        _ = try await planner.add(link, accountID: account.id)
+        let snapshot = try await MailService(api: context.api, store: context.store).sync(account: account)
+        #expect(snapshot.threads.map(\.id) == ["old-linked"])
+        #expect(snapshot.threads.first?.messages.first?.plainText == "Updated on Gmail")
+        #expect(try await planner.snapshot(accountID: account.id).links == [link])
+        #expect(try await context.store.metadata(String.self, key: "mailHistoryID", accountID: account.id) == "fresh")
+    }
+
     @Test func staleMailSnapshotsCannotOverwriteNewerForegroundChanges() async throws {
         let context = try RegressionContext { _ in json("{}") }
         defer { context.cleanup() }
@@ -751,5 +983,170 @@ struct MailRegressions {
         let inbox = try #require(initial.threads.first { $0.labels.contains("INBOX") })
         let undo = try await service.archive(threadID: inbox.id, account: account)
         await #expect(throws: MailService.MailError.self) { try await service.undo(tokenID: undo.id, account: account) }
+    }
+}
+
+private final class BubbleRefreshFailure: @unchecked Sendable {
+    private let lock = NSLock()
+    private let backend: MockGoogleBackend
+    private var armed = false
+    private var rejectMutation = false
+    private var failNextRead = false
+
+    init(backend: MockGoogleBackend) { self.backend = backend }
+    func arm(rejectMutation: Bool = false) {
+        lock.withLock { armed = true; self.rejectMutation = rejectMutation }
+    }
+    func handle(_ request: URLRequest) throws -> (Int, Data) {
+        try lock.withLock {
+            if failNextRead && request.httpMethod == "GET" && request.url!.path.hasSuffix("/threads/t-bank") {
+                failNextRead = false
+                throw URLError(.notConnectedToInternet)
+            }
+            if armed && request.httpMethod == "POST" && request.url!.path.hasSuffix("/threads/t-bank/modify") {
+                armed = false
+                if rejectMutation { return (500, Data(#"{"error":{"message":"Write failed"}}"#.utf8)) }
+                failNextRead = true
+            }
+            let response = backend.handle(request)
+            return (response.status, response.body)
+        }
+    }
+}
+
+@Suite("Interrupted delivery recovery")
+struct DeliveryRecoveryRegressions {
+    private let account = Account(id: "owner@example.com", email: "owner@example.com")
+
+    @Test func acceptedSendWithLostResponseIsFoundWithoutSendingAgain() async throws {
+        let outgoing = OutgoingMessage(to: ["reader@example.com"], subject: "One copy", body: "Hello")
+        let messageID = outgoing.rfcMessageID!
+        let context = try RegressionContext { request in
+            let path = request.url!.path
+            if path.hasSuffix("/messages/send") { throw URLError(.networkConnectionLost) }
+            if path.hasSuffix("/messages") {
+                #expect(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "q" })?.value == "in:sent rfc822msgid:\(messageID)")
+                return json(#"{"messages":[{"id":"sent-one","threadId":"thread-one"}]}"#)
+            }
+            if path.hasSuffix("/messages/sent-one") {
+                let data = try JSONSerialization.data(withJSONObject: ["id": "sent-one", "threadId": "thread-one", "labelIds": ["SENT"], "payload": ["headers": [["name": "Message-ID", "value": messageID]]]])
+                return (200, data)
+            }
+            return (500, Data(#"{"error":{"message":"Cache refresh unavailable"}}"#.utf8))
+        }
+        defer { context.cleanup() }
+        try await context.prepareMail(account)
+        let service = MailService(api: context.api, store: context.store)
+        let first = try await service.send(outgoing, account: account)
+        #expect(first.messageID == "sent-one")
+        // Recreating the service represents relaunching after a lost UI update.
+        let reopened = MailService(api: context.api, store: context.store)
+        let second = try await reopened.send(outgoing, account: account)
+        #expect(second.messageID == first.messageID)
+        #expect(context.transport.recorded().filter { $0.url!.path.hasSuffix("/messages/send") }.count == 1)
+    }
+
+    @Test func gmailRewrittenMessageIDIsRecoveredUsingDeliveryMarker() async throws {
+        let outgoing = OutgoingMessage(to: ["reader@example.com"], body: "Exactly once", draftID: "draft-one")
+        let marker = outgoing.rfcMessageID!
+        let context = try RegressionContext { request in
+            let path = request.url!.path
+            if path.hasSuffix("/drafts/draft-one") && request.httpMethod == "PUT" {
+                return json(#"{"id":"draft-one"}"#)
+            }
+            if path.hasSuffix("/drafts/send") { throw URLError(.networkConnectionLost) }
+            if path.hasSuffix("/messages") {
+                let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }?.value ?? ""
+                if query.contains("rfc822msgid:") { return json(#"{"messages":[]}"#) }
+                #expect(query.hasPrefix("in:sent after:"))
+                return json(#"{"messages":[{"id":"rewritten","threadId":"thread-one"}]}"#)
+            }
+            if path.hasSuffix("/messages/rewritten") {
+                return (200, try JSONSerialization.data(withJSONObject: ["id": "rewritten", "threadId": "thread-one", "labelIds": ["SENT"], "payload": ["headers": [
+                    ["name": "Message-ID", "value": "<rewritten@mail.gmail.com>"],
+                    ["name": "X-EmailCalendar-Delivery-ID", "value": marker]
+                ]]]))
+            }
+            return (500, Data())
+        }
+        defer { context.cleanup() }
+        try await context.prepareMail(account)
+        let service = MailService(api: context.api, store: context.store)
+        let receipt = try await service.send(outgoing, account: account)
+        #expect(receipt.messageID == "rewritten")
+        let reopened = MailService(api: context.api, store: context.store)
+        let checked = try await reopened.send(outgoing, account: account)
+        #expect(checked.messageID == receipt.messageID)
+        #expect(context.transport.recorded().filter { $0.url!.path.hasSuffix("/drafts/send") }.count == 1)
+    }
+
+    @Test func unconfirmedDeliveryCannotBeRetriedOrOverwrittenAfterRestart() async throws {
+        let outgoing = OutgoingMessage(to: ["reader@example.com"], subject: "Uncertain", body: "Keep this", draftID: "draft-one")
+        let context = try RegressionContext { request in
+            let path = request.url!.path
+            if path.hasSuffix("/drafts/draft-one") && request.httpMethod == "PUT" { return json(#"{"id":"draft-one"}"#) }
+            if path.hasSuffix("/drafts/send") { throw URLError(.timedOut) }
+            if path.hasSuffix("/messages") { return json(#"{"messages":[]}"#) }
+            return (500, Data())
+        }
+        defer { context.cleanup() }
+        try await context.prepareMail(account)
+        let service = MailService(api: context.api, store: context.store)
+        await #expect(throws: MailDeliveryUncertainError.self) { try await service.send(outgoing, account: account) }
+        let reopened = MailService(api: context.api, store: context.store)
+        await #expect(throws: MailDeliveryUncertainError.self) { try await reopened.send(outgoing, account: account) }
+        var edited = outgoing; edited.body = "Do not overwrite an uncertain send"
+        await #expect(throws: MailDeliveryUncertainError.self) { try await reopened.saveDraft(edited, account: account) }
+        #expect(context.transport.recorded().filter { $0.url!.path.hasSuffix("/drafts/send") }.count == 1)
+        #expect(context.transport.recorded().filter { $0.httpMethod == "PUT" }.count == 1)
+    }
+
+    @Test func explicitRejectionAndOfflineConnectionAllowRetry() async throws {
+        for offline in [true, false] {
+            let outgoing = OutgoingMessage(to: ["reader@example.com"], body: "Not accepted")
+            let context = try RegressionContext { request in
+                if request.url!.path.hasSuffix("/messages/send") {
+                    if offline { throw URLError(.notConnectedToInternet) }
+                    return (400, Data(#"{"error":{"message":"Invalid recipient"}}"#.utf8))
+                }
+                return (500, Data())
+            }
+            defer { context.cleanup() }
+            try await context.prepareMail(account)
+            let service = MailService(api: context.api, store: context.store)
+            for _ in 0..<2 {
+                do { _ = try await service.send(outgoing, account: account); Issue.record("Expected a rejected send") }
+                catch { #expect(!(error is MailDeliveryUncertainError)) }
+            }
+            #expect(context.transport.recorded().filter { $0.url!.path.hasSuffix("/messages/send") }.count == 2)
+        }
+    }
+
+    @Test func stableMessageIDSurvivesEncodingAndRecovery() throws {
+        let outgoing = OutgoingMessage(to: ["reader@example.com"], body: "Stable")
+        let restored = try JSONDecoder().decode(OutgoingMessage.self, from: JSONEncoder().encode(outgoing))
+        for value in [outgoing, restored] {
+            let mime = String(decoding: try MIMEComposer.compose(value, from: account.email), as: UTF8.self)
+            #expect(mime.contains("Message-ID: \(outgoing.rfcMessageID!)\r\n"))
+        }
+    }
+}
+
+@Suite("Delivery composer recovery")
+@MainActor
+struct DeliveryComposerRecoveryRegressions {
+    @Test func pendingDeliveryReopensLockedAndChecksWithoutAutosaving() async throws {
+        var buffer = DraftSession.Buffer(message: OutgoingMessage(to: ["reader@example.com"], body: "Exact pending body"), to: "reader@example.com", cc: "", bcc: "")
+        buffer.sendNeedsVerification = true
+        let session = DraftSession(recovering: buffer, delay: .milliseconds(5))
+        var saves = 0, checks = 0
+        session.configure(save: { value in saves += 1; return value }, send: { _ in checks += 1 })
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(session.sendNeedsVerification)
+        #expect(saves == 0)
+        try await session.send()
+        #expect(checks == 1)
+        #expect(!session.sendNeedsVerification)
+        #expect(session.recoveryBuffer == nil)
     }
 }

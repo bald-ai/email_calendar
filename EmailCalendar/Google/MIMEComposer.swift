@@ -17,6 +17,12 @@ public enum MIMEComposerError: Error, LocalizedError, Sendable {
 /// RFC 5322 / MIME encoding, including Unicode headers and binary attachments.
 /// Gmail accepts the returned bytes base64url encoded in its `raw` message field.
 public enum MIMEComposer {
+    /// Use the encoder's mailbox rules for the Send button as well as the actual request.
+    public static func hasValidRecipients(_ outgoing: OutgoingMessage) -> Bool {
+        let recipients = outgoing.to + outgoing.cc + outgoing.bcc
+        return !recipients.isEmpty && recipients.allSatisfy { (try? address($0)) != nil }
+    }
+
     public static func compose(_ outgoing: OutgoingMessage, from: String) throws -> Data {
         try validateHeader(outgoing.subject, field: "subject")
         let fromAddress = try address(from)
@@ -25,13 +31,14 @@ public enum MIMEComposer {
         let bcc = try outgoing.bcc.map(address)
         let boundary = "EmailCalendar-\(UUID().uuidString)"
         let senderDomain = from.components(separatedBy: "@").last?.replacingOccurrences(of: ">", with: "") ?? "localhost"
-        let messageID = "<\(UUID().uuidString.lowercased())@\(senderDomain)>"
+        let messageID = outgoing.rfcMessageID ?? "<\(UUID().uuidString.lowercased())@\(senderDomain)>"
+        try validateMessageID(messageID)
         let date = DateFormatter()
         date.locale = Locale(identifier: "en_US_POSIX")
         date.timeZone = TimeZone(secondsFromGMT: 0)
         date.dateFormat = "EEE, dd MMM yyyy HH:mm:ss Z"
 
-        var headers = ["From: \(fromAddress)", "Date: \(date.string(from: .now))", "Message-ID: \(messageID)"]
+        var headers = ["From: \(fromAddress)", "Date: \(date.string(from: .now))", "Message-ID: \(messageID)", "X-EmailCalendar-Delivery-ID: \(messageID)"]
         if !to.isEmpty { headers.append(foldAddressList("To", to)) }
         if !cc.isEmpty { headers.append(foldAddressList("Cc", cc)) }
         // Gmail strips this header from the delivered message after routing the Bcc recipients.
@@ -58,11 +65,9 @@ public enum MIMEComposer {
             for attachment in outgoing.attachments {
                 try validateHeader(attachment.name, field: "attachment name")
                 guard isMIMEType(attachment.mimeType) else { throw MIMEComposerError.invalidHeader("attachment MIME type") }
-                let name = asciiFilename(attachment.name)
-                let encodedName = attachment.name.addingPercentEncoding(withAllowedCharacters: rfc2231Allowed) ?? "attachment"
                 content += "--\(boundary)\r\n"
                 content += "Content-Type: \(attachment.mimeType)\r\n"
-                content += "Content-Disposition: attachment; filename=\"\(name)\";\r\n filename*=utf-8''\(encodedName)\r\n"
+                content += "Content-Disposition: attachment;\r\n \(filenameParameter(attachment.name))\r\n"
                 content += "Content-Transfer-Encoding: base64\r\n\r\n"
                 content += base64Lines(attachment.data) + "\r\n"
             }
@@ -139,12 +144,29 @@ public enum MIMEComposer {
         }.joined(separator: "\r\n")
     }
 
-    private static func asciiFilename(_ value: String) -> String {
-        let ascii = value.unicodeScalars.map { scalar -> String in
-            scalar.isASCII && scalar.value >= 32 ? String(scalar) : "_"
-        }.joined()
-        return (ascii.isEmpty ? "attachment" : ascii)
-            .replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    private static func filenameParameter(_ value: String) -> String {
+        let value = value.isEmpty ? "attachment" : value
+        if value.utf8.count <= 60 && value.unicodeScalars.allSatisfy(\.isASCII) {
+            let escaped = value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            return "filename=\"\(escaped)\""
+        }
+        // Do not also send a lossy ASCII filename: Gmail/HEY can prefer it over
+        // filename*, permanently replacing Unicode characters with underscores.
+        // RFC 2231 continuations keep long UTF-8 names within header line limits.
+        let atoms = value.utf8.map { byte -> String in
+            if rfc2231Allowed.contains(UnicodeScalar(byte)) { return String(UnicodeScalar(byte)) }
+            return String(format: "%%%02X", byte)
+        }
+        var chunks: [String] = [], current = ""
+        for atom in atoms {
+            if current.count + atom.count > 60 { chunks.append(current); current = "" }
+            current += atom
+        }
+        if !current.isEmpty { chunks.append(current) }
+        if chunks.count == 1 { return "filename*=utf-8''\(chunks[0])" }
+        return chunks.enumerated().map { index, chunk in
+            "filename*\(index)*=\(index == 0 ? "utf-8''" : "")\(chunk)"
+        }.joined(separator: ";\r\n ")
     }
 
     private static func isMIMEType(_ value: String) -> Bool {

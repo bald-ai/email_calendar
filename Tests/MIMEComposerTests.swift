@@ -80,6 +80,36 @@ final class MIMEComposerTests: XCTestCase {
         }
     }
 
+    func testUnicodeAndLongAttachmentNamesRoundTripWithoutLossyFallback() throws {
+        for name in ["Příloha – unicode.txt", String(repeating: "日本語😀", count: 35) + ".zip"] {
+            let message = OutgoingMessage(to: ["reader@example.com"], attachments: [
+                OutgoingAttachment(name: name, mimeType: "application/octet-stream", data: Data([0, 13, 10, 255]))
+            ])
+            let text = String(decoding: try MIMEComposer.compose(message, from: "owner@example.com"), as: UTF8.self)
+            let parameterBlock = try XCTUnwrap(text.components(separatedBy: "Content-Disposition: attachment;\r\n ").last)
+                .components(separatedBy: "\r\nContent-Transfer-Encoding:")[0]
+            XCTAssertFalse(parameterBlock.contains("filename=\""), "Lossy fallback names override Unicode in some mail clients")
+            let segments = parameterBlock.components(separatedBy: ";\r\n ")
+            let encoded = segments.enumerated().map { index, segment -> String in
+                XCTAssertLessThan(segment.utf8.count, 80)
+                let value = String(segment.split(separator: "=", maxSplits: 1)[1])
+                return index == 0 ? String(value.dropFirst("utf-8''".count)) : value
+            }.joined()
+            XCTAssertEqual(encoded.removingPercentEncoding, name)
+        }
+    }
+
+    func testOversizedMessageIsRejectedBeforeUpload() {
+        let message = OutgoingMessage(to: ["reader@example.com"], attachments: [
+            OutgoingAttachment(name: "too-large.bin", mimeType: "application/octet-stream", data: Data(repeating: 0, count: 27 * 1024 * 1024))
+        ])
+        XCTAssertThrowsError(try MIMEComposer.compose(message, from: "owner@example.com")) { error in
+            guard case MIMEComposerError.oversizedMessage = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
     func testBase64URLRoundTripsArbitraryBinaryAndPaddingLengths() {
         for length in 0...257 {
             let payload = Data((0..<length).map { UInt8(truncatingIfNeeded: $0 * 37) })

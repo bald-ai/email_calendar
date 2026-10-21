@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct MailComposition: Identifiable {
     let id = UUID()
     var title: String
+    var accountID: String?
     let session: DraftSession
     var message: OutgoingMessage {
         get { session.message }
@@ -15,6 +16,12 @@ struct MailComposition: Identifiable {
     init(title: String, message: OutgoingMessage) {
         self.title = title
         session = DraftSession(message: message)
+    }
+
+    init(recovery: DraftRecovery, accountID: String) {
+        title = recovery.title
+        self.accountID = accountID
+        session = DraftSession(recovering: recovery.buffer)
     }
 
     static var newMessage: MailComposition { MailComposition(title: "New message", message: OutgoingMessage()) }
@@ -41,7 +48,8 @@ struct MailComposition: Identifiable {
         MailComposition(title: "Draft", message: OutgoingMessage(to: original.to.map(\.email), cc: original.cc.map(\.email),
             bcc: original.bcc.map(\.email), subject: original.subject, body: original.plainText.isEmpty ? (original.html.map(plainText(from:)) ?? "") : original.plainText,
             draftID: original.draftID, threadID: original.threadID,
-            inReplyTo: original.inReplyTo, references: original.references))
+            inReplyTo: original.inReplyTo, references: original.references,
+            rfcMessageID: original.rfcMessageID ?? "<\(UUID().uuidString.lowercased())@emailcalendar.local>"))
     }
 
     private static func unique(_ addresses: [String]) -> [String] {
@@ -56,7 +64,8 @@ struct MailComposition: Identifiable {
     private static func quote(_ original: MailMessage) -> String {
         let text = original.plainText.isEmpty ? (original.html.map(plainText(from:)) ?? original.snippet) : original.plainText
         return "On \(original.date.formatted(date: .abbreviated, time: .shortened)), \(original.from.formatted) wrote:\n" +
-            text.components(separatedBy: .newlines).map { "> \($0)" }.joined(separator: "\n")
+            text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+                .components(separatedBy: "\n").map { "> \($0)" }.joined(separator: "\n")
     }
 
     /// Convert HTML-only mail for quoting without starting an HTML importer that
@@ -100,13 +109,7 @@ struct MailComposerView: View {
 
     private var outgoing: OutgoingMessage { draft.outgoing }
 
-    private var canSend: Bool {
-        let recipients = outgoing.to + outgoing.cc + outgoing.bcc
-        return !recipients.isEmpty && recipients.allSatisfy { address in
-            let pieces = address.split(separator: "@", omittingEmptySubsequences: false)
-            return pieces.count == 2 && !pieces[0].isEmpty && pieces[1].contains(".") && !address.contains(where: { $0.isWhitespace })
-        }
-    }
+    private var canSend: Bool { draft.canSend }
 
     var body: some View {
         @Bindable var draft = draft
@@ -168,12 +171,13 @@ struct MailComposerView: View {
             .clipShape(UnevenRoundedRectangle(topLeadingRadius: 26, topTrailingRadius: 26))
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 24)
+            .disabled(draft.sendNeedsVerification || isSending)
 
             HStack(spacing: 10) {
                 Button { Task { await send() } } label: {
                     HStack(spacing: 6) {
                         if isSending { ProgressView().controlSize(.small) } else { Image(systemName: "paperplane.fill") }
-                        Text("Send")
+                        Text(draft.sendNeedsVerification ? "Check send status" : "Send")
                         Text("⌘↩").font(.system(size: 11, weight: .semibold)).opacity(0.7)
                     }
                 }
@@ -182,6 +186,7 @@ struct MailComposerView: View {
                 .disabled(!canSend || isSending || isSaving)
                 Button { showsImporter = true } label: { Label("Attach", systemImage: "paperclip") }
                     .buttonStyle(PillButtonStyle(fill: .white.opacity(0.1)))
+                    .disabled(draft.sendNeedsVerification)
                 Button { Task { await save(close: true) } } label: { Label("Save & close", systemImage: "tray.and.arrow.down") }
                     .buttonStyle(PillButtonStyle(fill: .white.opacity(0.1)))
                     .keyboardShortcut(.cancelAction)

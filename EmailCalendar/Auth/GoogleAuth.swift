@@ -110,7 +110,9 @@ public final class GoogleAuth: NSObject, ObservableObject, GoogleTokenProvider, 
         ]
         // ASWebAuthenticationSession's HTTPS callback API cannot match an HTTP loopback URL.
         // The real HTTP listener completes the flow; cancelling afterward closes the session.
-        let browser = ASWebAuthenticationSession(url: authorization.url!, callbackURLScheme: nil) { _, error in
+        // AuthenticationServices may invoke completion on an XPC background queue. Explicit
+        // Sendable isolation prevents inheriting this method's MainActor requirement.
+        let browser = ASWebAuthenticationSession(url: authorization.url!, callbackURLScheme: nil) { @Sendable _, error in
             if let error { Task { await server.cancel(error: error) } }
         }
         browser.presentationContextProvider = self

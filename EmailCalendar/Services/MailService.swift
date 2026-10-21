@@ -54,16 +54,29 @@ struct MailSearchPage: Sendable {
     var revision: UInt64 = 0
 }
 
-struct MailSendReceipt: Sendable {
+struct MailSendReceipt: Codable, Sendable {
     var messageID: String
     var threadID: String
     var warning: String?
+}
+
+struct MailDeliveryUncertainError: LocalizedError, Sendable {
+    var errorDescription: String? {
+        "Gmail may have accepted this email, but its response was interrupted. Check send status before doing anything else. The app will look for the original message without sending another copy."
+    }
+}
+
+private struct MailSendAttempt: Codable, Sendable {
+    var rfcMessageID: String
+    var startedAt: Date? = nil
+    var receipt: MailSendReceipt?
 }
 
 struct MailUndoToken: Identifiable, Sendable {
     var id: UUID
     var message: String
     var expiresAt: Date
+    var warning: String? = nil
 }
 
 /// Gmail owns labels and message content. SQLite owns sender decisions, timers and the cache.
@@ -258,11 +271,14 @@ actor MailService {
         for label in ["INBOX", "DRAFT"] + Self.specialLabels {
             ids.formUnion(try await threadIDs(labelIDs: [try labelID(label, accountID: account.id)]))
         }
+        ids.formUnion(try await store.all(MailLink.self, collection: PlannerService.linkCollection, accountID: account.id).map(\.threadID))
         let sources = try await cacheSources(Array(ids), account: account, isSync: true)
         let present = Set(sources.map(\.id))
         try await serialized(accountID: account.id) {
+            let linkedIDs = Set(try await self.store.all(MailLink.self, collection: PlannerService.linkCollection, accountID: account.id).map(\.threadID))
             for old in initial where !present.contains(old.id) {
                 // A foreground action/search may have made an old thread relevant during enumeration.
+                guard !linkedIDs.contains(old.id) else { continue }
                 guard await self.threadVersion(old.id, accountID: account.id) == versions[old.id] else { continue }
                 try await self.store.remove(id: old.id, collection: "threads", accountID: account.id)
             }
@@ -433,12 +449,30 @@ actor MailService {
         let bubble = BubbleRecord(accountID: account.id, threadID: threadID, dueAt: date)
         try await store.save(bubble, id: threadID, collection: "bubbles", accountID: account.id, sortDate: date)
         do {
-            _ = try await changeLabels(threadID: threadID, adding: ["HEY/Bubble Up"], removing: ["INBOX", "HEY/Set Aside"], account: account)
+            _ = try await api.modifyThread(id: threadID,
+                addLabelIDs: [try labelID("HEY/Bubble Up", accountID: account.id)],
+                removeLabelIDs: ["INBOX", try labelID("HEY/Set Aside", accountID: account.id)])
         } catch {
             try? await restoreBubble(state.bubble, threadID: threadID, accountID: account.id)
             throw error
         }
-        return register(message: "Will bubble up later", threads: [state], accountID: account.id)
+        // Gmail has committed. Keep the timer and reflect the accepted move even if the next read fails.
+        var warning: String?
+        do {
+            if var thread = try await store.load(MailThread.self, id: threadID, collection: "threads", accountID: account.id) {
+                for index in thread.messages.indices {
+                    thread.messages[index].labels.insert("HEY/Bubble Up")
+                    thread.messages[index].labels.subtract(["INBOX", "HEY/Set Aside"])
+                }
+                thread.labels = thread.messages.reduce(into: Set<String>()) { $0.formUnion($1.labels) }
+                thread.bubbleUpAt = date
+                try await save(thread)
+            }
+            _ = try await refresh(threadID: threadID, accountID: account.id)
+        } catch {
+            warning = "Bubble Up scheduled. The mail view could not refresh: " + error.localizedDescription
+        }
+        return register(message: "Will bubble up later", threads: [state], accountID: account.id, warning: warning)
     }
 
     /// Retain the durable due record until Gmail accepts the return-to-Inbox mutation.
@@ -525,6 +559,7 @@ actor MailService {
 
     private func saveDraftImpl(_ outgoing: OutgoingMessage, account: Account) async throws -> OutgoingMessage {
         try await prepare(account: account)
+        if try await sendAttempt(outgoing, account: account) != nil { throw MailDeliveryUncertainError() }
         let raw = try MIMEComposer.compose(outgoing, from: account.email)
         let draft: GoogleDraft
         if let id = outgoing.draftID { draft = try await api.updateDraft(id: id, raw: raw, threadID: outgoing.threadID) }
@@ -545,20 +580,87 @@ actor MailService {
 
     private func sendImpl(_ outgoing: OutgoingMessage, account: Account) async throws -> MailSendReceipt {
         try await prepare(account: account)
+        if let attempt = try await sendAttempt(outgoing, account: account) {
+            if let receipt = attempt.receipt { return receipt }
+            return try await reconcileSend(attempt, outgoing: outgoing, account: account)
+        }
         guard !outgoing.to.isEmpty || !outgoing.cc.isEmpty || !outgoing.bcc.isEmpty else { throw MailError.noRecipients }
+        var outgoing = outgoing
+        if outgoing.rfcMessageID == nil { outgoing.rfcMessageID = "<\(UUID().uuidString.lowercased())@emailcalendar.local>" }
         let raw = try MIMEComposer.compose(outgoing, from: account.email)
+        // Draft updates cannot deliver mail. Finish this step before recording an attempt.
+        if let draftID = outgoing.draftID { _ = try await api.updateDraft(id: draftID, raw: raw, threadID: outgoing.threadID) }
+        let attempt = MailSendAttempt(rfcMessageID: outgoing.rfcMessageID!, startedAt: .now, receipt: nil)
+        try await store.setMetadata(attempt, key: sendKey(outgoing), accountID: account.id)
         let sent: GoogleMailMessage
-        if let draftID = outgoing.draftID {
-            _ = try await api.updateDraft(id: draftID, raw: raw, threadID: outgoing.threadID)
-            sent = try await api.sendDraft(id: draftID)
-        } else { sent = try await api.sendMessage(raw: raw, threadID: outgoing.threadID) }
         do {
+            if let draftID = outgoing.draftID { sent = try await api.sendDraft(id: draftID) }
+            else { sent = try await api.sendMessage(raw: raw, threadID: outgoing.threadID) }
+        } catch {
+            let status = (error as? GoogleAPIError)?.statusCode
+            let neverConnected = (error as? URLError).map {
+                [URLError.notConnectedToInternet, .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost].contains($0.code)
+            } ?? false
+            if neverConnected || (status.map { (400..<500).contains($0) && $0 != 408 } ?? false) {
+                // An explicit rejection is safe to correct and retry.
+                try await store.removeMetadata(key: sendKey(outgoing), accountID: account.id)
+                throw error
+            }
+            return try await reconcileSend(attempt, outgoing: outgoing, account: account)
+        }
+        return await finishSend(sent, outgoing: outgoing, account: account)
+    }
+
+    private func sendKey(_ outgoing: OutgoingMessage) -> String {
+        "mail.sendAttempt." + (outgoing.draftID ?? outgoing.rfcMessageID ?? "legacy")
+    }
+
+    private func sendAttempt(_ outgoing: OutgoingMessage, account: Account) async throws -> MailSendAttempt? {
+        try await store.metadata(MailSendAttempt.self, key: sendKey(outgoing), accountID: account.id)
+    }
+
+    private func reconcileSend(_ attempt: MailSendAttempt, outgoing: OutgoingMessage, account: Account) async throws -> MailSendReceipt {
+        do {
+            let matches = try await api.listMessages(query: "in:sent rfc822msgid:\(attempt.rfcMessageID)", maxResults: 10)
+            for match in matches.items {
+                let message = try await api.message(id: match.id)
+                if message.labelIds?.contains("SENT") == true,
+                   message.header("Message-ID") == attempt.rfcMessageID {
+                    return await finishSend(message, outgoing: outgoing, account: account)
+                }
+            }
+            // Gmail can replace Message-ID when it sends a draft. Our private
+            // delivery marker survives that rewrite, so inspect recent Sent mail
+            // rather than ever guessing from a matching subject or resending.
+            let after = attempt.startedAt.map { " after:\(Int($0.timeIntervalSince1970) - 300)" } ?? ""
+            var pageToken: String?
+            for _ in 0..<10 {
+                let page = try await api.listMessages(query: "in:sent" + after, pageToken: pageToken, maxResults: 100)
+                for match in page.items {
+                    let message = try await api.message(id: match.id, format: "metadata")
+                    if message.labelIds?.contains("SENT") == true,
+                       message.header("X-EmailCalendar-Delivery-ID") == attempt.rfcMessageID {
+                        return await finishSend(message, outgoing: outgoing, account: account)
+                    }
+                }
+                guard let next = page.nextPageToken else { break }
+                pageToken = next
+            }
+        } catch { /* A failed lookup is not evidence that sending failed. */ }
+        throw MailDeliveryUncertainError()
+    }
+
+    private func finishSend(_ sent: GoogleMailMessage, outgoing: OutgoingMessage, account: Account) async -> MailSendReceipt {
+        let receipt = MailSendReceipt(messageID: sent.id, threadID: sent.threadId, warning: nil)
+        do {
+            try await store.setMetadata(MailSendAttempt(rfcMessageID: outgoing.rfcMessageID ?? "", receipt: receipt),
+                                        key: sendKey(outgoing), accountID: account.id)
             // New correspondents become approved immediately, as the first-run Sent seed does.
             let recipients = MailMapping.addresses((outgoing.to + outgoing.cc + outgoing.bcc).joined(separator: ","))
             try await approveUnknown(recipients.map(\.email), account: account)
             try await refreshDraftMap(accountID: account.id)
             _ = try await refresh(threadID: sent.threadId, accountID: account.id)
-            return MailSendReceipt(messageID: sent.id, threadID: sent.threadId, warning: nil)
+            return receipt
         } catch {
             return MailSendReceipt(messageID: sent.id, threadID: sent.threadId,
                 warning: "Email sent. The local mail cache could not refresh: " + error.localizedDescription)
@@ -578,8 +680,8 @@ actor MailService {
         return register(message: message, threads: [state], accountID: account.id)
     }
 
-    private func register(message: String, threads: [ThreadState], accountID: String) -> MailUndoToken {
-        let token = MailUndoToken(id: UUID(), message: message, expiresAt: .now.addingTimeInterval(undoDuration))
+    private func register(message: String, threads: [ThreadState], accountID: String, warning: String? = nil) -> MailUndoToken {
+        let token = MailUndoToken(id: UUID(), message: message, expiresAt: .now.addingTimeInterval(undoDuration), warning: warning)
         undoActions[token.id] = UndoAction(token: token, accountID: accountID, threads: threads)
         return token
     }

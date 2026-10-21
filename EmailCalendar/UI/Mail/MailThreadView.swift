@@ -36,6 +36,9 @@ struct MailThreadView: View {
                     Text(thread.subject.isEmpty ? "(no subject)" : thread.subject)
                         .font(.system(size: 30, weight: .bold)).multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 20)
+                        .draggableThread(thread)
+                        .help("Drag onto an event or to-do to link this email")
+                    ThreadLinksBar(thread: thread)
                     if let due = thread.bubbleUpAt {
                         Label("Bubbles up \(due.formatted(date: .abbreviated, time: .shortened))", systemImage: "bubbles.and.sparkles")
                             .font(.callout).foregroundStyle(Theme.unread)
@@ -64,6 +67,7 @@ struct MailThreadView: View {
             }
             barButton(thread.isSetAside ? "Take Back" : "Set Aside", symbol: "pin", key: "A") { act(.setAside) }
             barButton("Bubble Up", symbol: "bubbles.and.sparkles", key: "Z", perform: bubble)
+            barButton("To-do", symbol: "checklist", key: "T") { act(.moveToTodo) }
             barButton("Archive", symbol: "archivebox", key: "E") { act(.archive) }
             barButton("More", symbol: "ellipsis", key: "M") { showsMore.toggle() }
                 .popover(isPresented: $showsMore, arrowEdge: .top) { moreMenu }
@@ -81,6 +85,7 @@ struct MailThreadView: View {
                 moreItem("Forward", symbol: "arrowshape.turn.up.right") { compose(replyTarget, .forward) }
                 Divider().padding(.vertical, 4)
             }
+            moreItem("Link to an event or to-do", symbol: "link") { act(.link) }
             moreItem(thread.unread ? "Mark as read" : "Mark as unread", symbol: "envelope.badge") { act(.toggleRead) }
             moreItem("Move to Trash", symbol: "trash") { act(.trash) }
         }

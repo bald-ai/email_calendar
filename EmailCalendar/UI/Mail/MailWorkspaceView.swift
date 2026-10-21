@@ -103,7 +103,7 @@ struct MailRootView: View {
         }
     }
 
-    enum ThreadAction { case archive, setAside, trash, toggleRead, seen }
+    enum ThreadAction { case archive, setAside, trash, toggleRead, seen, moveToTodo, link }
 
     private func perform(_ action: ThreadAction, on thread: MailThread) {
         Task {
@@ -113,6 +113,8 @@ struct MailRootView: View {
             case .trash: await store.trash(thread)
             case .toggleRead: await store.setRead(thread, thread.unread); return
             case .seen: await store.setRead(thread, true)
+            case .moveToTodo: await store.moveToTodo(thread); return
+            case .link: store.startLinking(thread); return
             }
             store.advanceAfterAction(from: thread.id)
         }
@@ -164,12 +166,21 @@ struct MailRootView: View {
         if modifiers == .command && character == "z", store.undoMessage != nil { Task { await store.undo() }; return true }
         guard modifiers.isEmpty else { return false }
         if event.keyCode == 53 {
+            if store.linkingThreadID != nil { store.cancelLinking(); return true }
             if store.openThreadID != nil { store.closeThread(); return true }
             if store.poweringThrough { store.endPowerThrough(); return true }
             if mailbox != .imbox { store.navigation = .imbox; return true }
             return false
         }
+        // ← / → slide the drawers: Days on the left, To-do on the right.
+        if event.keyCode == 123 || event.keyCode == 124 {
+            withAnimation(MailWorkspace.settle) { store.slideDrawers(event.keyCode == 123 ? 1 : -1) }
+            return true
+        }
         switch character {
+        case "t": if let focused { perform(.moveToTodo, on: focused) }
+        case "l": if let focused { perform(.link, on: focused) }
+        case "+", "=": store.focusTodoField()
         case "j": moveSelection(1)
         case "k": moveSelection(-1)
         case "c": composition = .newMessage
@@ -199,6 +210,9 @@ struct MailRootView: View {
             MailPaletteCommand(title: "Search mail", symbol: "magnifyingglass", shortcut: "/") { searchFocus() },
             MailPaletteCommand(title: "Power through new mail", symbol: "bolt", shortcut: "p") { store.navigation = .imbox; store.powerThroughNew() },
             MailPaletteCommand(title: "Refresh mail and calendar", symbol: "arrow.clockwise", shortcut: "") { Task { await store.refresh() } },
+            MailPaletteCommand(title: "Show the next seven days", symbol: "calendar", shortcut: "←") { store.drawerPosition = 1 },
+            MailPaletteCommand(title: "Show to-dos", symbol: "checklist", shortcut: "→") { store.drawerPosition = -1 },
+            MailPaletteCommand(title: "Add a to-do", symbol: "plus", shortcut: "+") { store.focusTodoField() },
             MailPaletteCommand(title: "Manage screened senders", symbol: "person.crop.circle", shortcut: "") { showsScreenedSenders = true }
         ]
         for mailbox in Mailbox.allCases {
@@ -210,6 +224,8 @@ struct MailRootView: View {
                 MailPaletteCommand(title: "Move thread to Trash", symbol: "trash", shortcut: "") { perform(.trash, on: selected) },
                 MailPaletteCommand(title: selected.isSetAside ? "Return thread to Imbox" : "Set thread aside", symbol: "pin", shortcut: "a") { perform(.setAside, on: selected) },
                 MailPaletteCommand(title: "Bubble Up thread", symbol: "bubbles.and.sparkles", shortcut: "z") { bubbleThread = selected },
+                MailPaletteCommand(title: "Move to To-do", symbol: "checklist", shortcut: "t") { perform(.moveToTodo, on: selected) },
+                MailPaletteCommand(title: "Link to an event or to-do", symbol: "link", shortcut: "l") { perform(.link, on: selected) },
                 MailPaletteCommand(title: selected.unread ? "Mark thread read" : "Mark thread unread", symbol: "envelope", shortcut: "") { perform(.toggleRead, on: selected) }
             ]
             if let message = replyMessage(selected) {
@@ -349,9 +365,14 @@ private struct MailboxPage: View {
     private func rows(_ threads: [MailThread]) -> some View {
         LazyVStack(spacing: 2) {
             ForEach(threads) { thread in
-                MailThreadRow(thread: thread, mailbox: mailbox, isFocused: store.selectedThreadID == thread.id)
+                MailThreadRow(thread: thread, mailbox: mailbox, isFocused: store.selectedThreadID == thread.id,
+                              isLinked: store.isLinked(thread.id))
                     .onTapGesture { store.open(thread) }
+                    .draggableThread(thread)
                     .contextMenu {
+                        Button("Move to To-do") { Task { await store.moveToTodo(thread) } }
+                        Button("Link to an Event or To-do…") { store.startLinking(thread) }
+                        Divider()
                         Button("Archive") { Task { await store.archive(thread) } }
                         Button(thread.unread ? "Mark read" : "Mark unread") { Task { await store.setRead(thread, thread.unread) } }
                         Button(thread.isSetAside ? "Return to Imbox" : "Set Aside") { Task { await store.toggleSetAside(thread) } }
@@ -395,6 +416,8 @@ struct MailThreadRow: View {
     var thread: MailThread
     var mailbox: Mailbox
     var isFocused = false
+    /// Attached to an event or to-do.
+    var isLinked = false
     @State private var hovering = false
 
     var body: some View {
@@ -411,6 +434,10 @@ struct MailThreadRow: View {
                     if thread.messages.count > 2 { Text("(\(thread.messages.count))").font(.system(size: 13)).foregroundStyle(Theme.secondary) }
                     if thread.messages.contains(where: { !$0.attachments.isEmpty }) {
                         Image(systemName: "paperclip").font(.system(size: 11)).foregroundStyle(Theme.secondary)
+                    }
+                    if isLinked {
+                        Image(systemName: "link").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.secondary)
+                            .help("Linked to an event or to-do")
                     }
                 }
                 Text("\(personLabel) – \(thread.snippet)").font(.system(size: 12.5)).foregroundStyle(Theme.secondary).lineLimit(1)

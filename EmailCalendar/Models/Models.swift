@@ -142,6 +142,8 @@ public struct OutgoingAttachment: Codable, Sendable, Identifiable, Equatable {
 }
 
 public struct OutgoingMessage: Codable, Sendable, Equatable {
+    /// Stable across autosaves and retries, so an interrupted send can be found in Gmail.
+    public var rfcMessageID: String?
     public var to: [String]
     public var cc: [String]
     public var bcc: [String]
@@ -154,10 +156,12 @@ public struct OutgoingMessage: Codable, Sendable, Equatable {
     public var references: [String]
     public init(to: [String] = [], cc: [String] = [], bcc: [String] = [], subject: String = "", body: String = "",
                 attachments: [OutgoingAttachment] = [], draftID: String? = nil, threadID: String? = nil,
-                inReplyTo: String? = nil, references: [String] = []) {
+                inReplyTo: String? = nil, references: [String] = [],
+                rfcMessageID: String? = "<\(UUID().uuidString.lowercased())@emailcalendar.local>") {
         self.to = to; self.cc = cc; self.bcc = bcc; self.subject = subject; self.body = body
         self.attachments = attachments; self.draftID = draftID; self.threadID = threadID
         self.inReplyTo = inReplyTo; self.references = references
+        self.rfcMessageID = rfcMessageID
     }
 }
 

@@ -3,6 +3,7 @@ import SwiftUI
 
 @main
 struct EmailCalendarApp: App {
+    @NSApplicationDelegateAdaptor(AppTerminationDelegate.self) private var appDelegate
     @State private var store: AppStore
     @State private var overlay: OverlayController
 
@@ -12,6 +13,7 @@ struct EmailCalendarApp: App {
         _store = State(initialValue: state)
         _overlay = State(initialValue: panel)
         state.showOverlay = { [weak panel] in panel?.toggle() }
+        appDelegate.store = state
     }
 
     var body: some Scene {
@@ -59,6 +61,24 @@ struct EmailCalendarApp: App {
         Settings {
             PreferencesView().environment(store)
         }
+    }
+}
+
+@MainActor
+final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
+    weak var store: AppStore?
+    private var preparing = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let store else { return .terminateNow }
+        guard !preparing else { return .terminateLater }
+        preparing = true
+        Task {
+            let preserved = await store.prepareToQuit()
+            preparing = false
+            sender.reply(toApplicationShouldTerminate: preserved)
+        }
+        return .terminateLater
     }
 }
 #endif

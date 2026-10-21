@@ -2,6 +2,24 @@ import Foundation
 
 /// Google Calendar repeat rules (RFC 5545 RRULE lines), as the AI writes them and the app stores them.
 public enum RepeatRule {
+    /// Moving all occurrences moves every explicit weekday in a weekly rule by the same amount.
+    static func shiftingWeeklyDays(_ rules: [String], from oldStart: Date, to newStart: Date, calendar: Calendar) -> [String] {
+        let shift = (calendar.component(.weekday, from: newStart) - calendar.component(.weekday, from: oldStart) + 7) % 7
+        guard shift != 0 else { return rules }
+        let days = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"]
+        return rules.map { rule in
+            guard rule.uppercased().hasPrefix("RRULE:") else { return rule }
+            var fields = String(rule.dropFirst(6)).split(separator: ";").map(String.init)
+            guard fields.contains(where: { $0.uppercased() == "FREQ=WEEKLY" }),
+                  let index = fields.firstIndex(where: { $0.uppercased().hasPrefix("BYDAY=") }) else { return rule }
+            let weekdays = fields[index].dropFirst(6).split(separator: ",").map { $0.uppercased() }
+            // Only bare weekday codes are valid for weekly BYDAY; leave unfamiliar rules intact.
+            guard !weekdays.isEmpty, weekdays.allSatisfy(days.contains) else { return rule }
+            fields[index] = "BYDAY=" + weekdays.map { days[(days.firstIndex(of: $0)! + shift) % 7] }.joined(separator: ",")
+            return "RRULE:" + fields.joined(separator: ";")
+        }
+    }
+
     /// UNTIL is inclusive and must have the same value type as DTSTART (RFC 5545).
     static func forEvent(_ rule: String, isAllDay: Bool, timeZone: TimeZone) -> String? {
         guard rule.uppercased().hasPrefix("RRULE:") else { return rule }

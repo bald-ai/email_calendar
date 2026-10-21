@@ -37,8 +37,10 @@ For normal use, build a signed app, move it to `/Applications`, and launch it th
 
 ## Included
 
-- A single centered column with no sidebar: Imbox (new for you / previously seen), Screener, Set Aside (also as a pile at the bottom of the Imbox), Bubble Up, Drafts, Sent, Screened Out, Everything and Calendar, reached from the menu under the logo.
-- Threads open as full pages with a floating action bar: Reply Now, Set Aside, Bubble Up, Archive, More.
+- Mail in one centered column with no sidebar: Imbox (new for you / previously seen), Screener, Set Aside (also as a pile at the bottom of the Imbox), Bubble Up, Drafts, Sent, Screened Out, Everything and Calendar, reached from the menu under the logo.
+- Threads open as full pages with a floating action bar: Reply Now, Set Aside, Bubble Up, To-do, Archive, More.
+- **Days and To-do drawers** beside mail, Ulysses-style: the next seven days on the left, to-dos on the right, one at a time. Slide them with a two-finger swipe, `←` / `→`, the toggles in the top bar, or by clicking a folded drawer's spine. Days is an agenda with a now-line; click an event to see its linked email, open it, or join its call. To-dos are local to this Mac (per account): add, rename (double-click), notes, done, and a folded Completed list.
+- **Link email to events and to-dos**: drag a mail row (or an open thread's subject) onto an event, a to-do, or the add field (which makes a new to-do from it). Hovering a dragged email over a folded drawer's spine opens it. Or press `l` and click an event or to-do. Linked threads show a link mark in the list and chips under the subject; events show a mail count; to-dos show the sender. **To-do** (`t`) makes a linked to-do and takes the email out of the Imbox; undo reverses both. Links and to-dos are stored locally with the mail cache.
 - Gmail history sync with expired-cursor recovery, full Gmail search, thread reading, compose/reply/reply-all/forward, attachments, Gmail drafts, read state, archive and Trash.
 - Sender and domain decisions, all-mail moves, Google rejection filters, and five-second undo that restores each message’s previous labels. Remote-image permission is separate from sender approval.
 - Durable Bubble Up times processed on launch and refresh; Gmail labels expose mail states on other devices. Due mail returns at the top when it surfaces, then sorts alongside newer mail.
@@ -48,7 +50,7 @@ For normal use, build a signed app, move it to `/Applications`, and launch it th
 - **AI add** in the overlay (`I`, or `⌘V` with a screenshot or text on the clipboard): describe an event, paste or drop a screenshot, or upload an image, and Claude Haiku 5.5 (high effort) proposes events, with GPT-6.1 Sol (normal speed, medium reasoning) as the automatic backup if a call fails. `EventAssistant.preferred` swaps the order. Each one shows the weekday, date, time, length and how far away it is, with editable date pickers and warnings for anything doubtful. Time-zone conversion and weekday checks are done in code, not by the model. The AI can also set what the editor offers: a real repeat rule ("every Tuesday for 8 weeks", "weekdays"), the calendar you name, and an alarm when you ask to be reminded; each card shows these as menus you can change. Events already in your calendar at that time are flagged: red for a likely duplicate, orange for an overlap. **Add** saves it to your primary calendar; **Add + alarm** also rings 10 minutes before (09:00 for all-day events). Keys come from Preferences (Keychain), `ANTHROPIC_API_KEY` / `ANTHROPIC_WORKSPACE_ID` / `OPENAI_API_KEY` in `Config/Secrets.xcconfig`, or the environment.
 - Sandboxed, ephemeral HTML rendering with JavaScript, forms, frames and remote resources blocked; remote images can be allowed per sender.
 
-The app polls while open and refreshes on focus and wake. Cached mail and events remain available offline; network writes report a failure and keep editable compose/event content open. There is no offline send queue. Gmail mail deletion only moves mail to Trash; the integration exposes no permanent message deletion endpoint.
+The app polls while open and refreshes on focus and wake. Cached mail and events remain available offline; network writes report a failure and keep editable compose/event content open. Quit flushes pending draft edits and waits for a send already in progress. If Gmail cannot save the draft, a local recovery copy (including recipients and attachments) opens in the composer on the next launch or sign-in to that account. There is no offline send queue. Gmail mail deletion only moves mail to Trash; the integration exposes no permanent message deletion endpoint.
 
 ## Keyboard
 
@@ -61,6 +63,8 @@ The app polls while open and refreshes on focus and wake. Cached mail and events
 | `a` (or `s`) | Set Aside, or take it back |
 | `z` (or `b`) | Bubble Up |
 | `e`, `m` | Archive, More |
+| `←` / `→` | Slide the drawers: Days on the left, To-do on the right (same as a two-finger swipe) |
+| `t`, `l`, `+` | Move the email to To-do, link it to an event or to-do, add a to-do |
 | `/`, `⌘K` | Search, command palette |
 | Escape, `⌘Z` | Back, undo |
 | `⌘Return` | Send from the composer |
@@ -130,6 +134,6 @@ The development environment for this implementation is Linux. Core Swift compila
 
 ## Source map
 
-`EmailCalendar/App` owns the shell and main-actor store; `Auth` owns OAuth/Keychain; `Google` owns the REST transport and MIME encoder; `Data` owns SQLite and mail normalization; `Services` owns sync and workflows; `UI` owns mail/calendar views; `Overlay` owns the AppKit panel. Account IDs namespace persisted data even though v1 connects one account at a time.
+`EmailCalendar/App` owns the shell and main-actor store; `Auth` owns OAuth/Keychain; `Google` owns the REST transport and MIME encoder; `Data` owns SQLite and mail normalization; `Services` owns sync and workflows; `UI` owns mail/calendar views and `UI/Planner` the Days and To-do drawers; `Overlay` owns the AppKit panel. Account IDs namespace persisted data even though v1 connects one account at a time.
 
 The product requirements are in [SPEC.md](SPEC.md).

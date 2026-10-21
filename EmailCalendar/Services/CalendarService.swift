@@ -204,7 +204,9 @@ actor CalendarService {
                 edited.start = calendar.date(byAdding: shift, to: masterEvent.start) ?? masterEvent.start
                 let duration = calendar.dateComponents([.day, .hour, .minute, .second], from: event.start, to: event.end)
                 edited.end = calendar.date(byAdding: duration, to: edited.start) ?? edited.start.addingTimeInterval(event.end.timeIntervalSince(event.start))
-                edited.recurrence = event.recurrence.isEmpty ? master.recurrence ?? [] : event.recurrence
+                edited.recurrence = event.recurrence.isEmpty
+                    ? RepeatRule.shiftingWeeklyDays(master.recurrence ?? [], from: old.start, to: event.start, calendar: calendar)
+                    : event.recurrence
                 edited.recurringEventID = nil
                 edited.originalStart = nil
                 original = master

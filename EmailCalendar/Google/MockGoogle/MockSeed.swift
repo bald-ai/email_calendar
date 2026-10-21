@@ -12,6 +12,13 @@ enum MockSeed {
 
     static let me = "\(MockGoogleBackend.accountName) <\(MockGoogleBackend.accountEmail)>"
 
+    /// The dentist appointment sits two days out, so its reminder email and the event both show in the Days drawer.
+    static func dentistAppointment(now: Date) -> Date {
+        let calendar = Calendar.current
+        let day = calendar.date(byAdding: .day, value: 2, to: calendar.startOfDay(for: now))!
+        return calendar.date(bySettingHour: 11, minute: 0, second: 0, of: day)!
+    }
+
     static func make(now: Date) -> MockState {
         var state = MockState()
         state.labels = MockGoogleBackend.systemLabels.sorted().map {
@@ -113,6 +120,20 @@ enum MockSeed {
         add("t-offsite", from: me, to: maya, subject: "Ideas for the offsite",
             body: "Rough list so far:\n- half-day hike\n- roadmap retro\n- ", ago: 30 * 60, labels: ["DRAFT"])
         state.drafts["r-offsite"] = "m\(String(format: "%04d", counter))"
+
+        // Two everyday emails that belong with something already planned: drag them onto it.
+        let accounts = "Accounts <accounting@client.example>"
+        add("t-po", from: accounts, subject: "PO number for the October invoice",
+            body: "Hi Alex,\n\nFor the October invoice, please use purchase order 4471 and address it to Client Studio s.r.o., Na Poříčí 12, 110 00 Praha 1.\n\nSend it to accounting@client.example by Friday so it makes this month's payment run.\n\nThanks,\nLucie (Accounts)",
+            ago: 25 * 60, labels: ["INBOX", "UNREAD"])
+        let dental = "Kovac Dental <recepce@kovacdental.example>"
+        let appointment = dentistAppointment(now: now)
+        let when = appointment.formatted(Date.FormatStyle(date: .complete, time: .omitted).locale(Locale(identifier: "en_GB")))
+        add("t-dental", from: me, to: dental, subject: "Check-up",
+            body: "Hello, could I book a check-up this week? Late mornings work best.\n\nAlex Rivera", ago: 6 * day, labels: ["SENT"])
+        add("t-dental", from: dental, subject: "Re: Check-up",
+            body: "Hello Alex,\n\nThis is a reminder of your check-up on \(when) at 11:00 with Dr. Kovač.\n\nPlease arrive 10 minutes early and bring your insurance card. If you need to move it, reply at least 24 hours before.\n\nKovac Dental, Vinohradská 48",
+            ago: 50 * 60, labels: ["INBOX", "UNREAD"])
 
         state.idCounter = 100
         state.historyID = 1_000
@@ -278,7 +299,8 @@ enum MockSeed {
         add(mine, "Climbing with Tom", timed(at(5, 9)), timed(at(5, 11, 30)), location: "Boulder Bar Holešovice")
         add(mine, "Lunch at Lokál", timed(at(5, 12, 30)), timed(at(5, 14)), location: "Lokál Dlouhá")
         add(mine, "Boiler service", timed(at(2, 8)), timed(at(2, 10)), notes: "Technician, someone must be home.")
-        add(mine, "Dentist", timed(at(8, 8)), timed(at(8, 8, 45)), location: "Kovac Dental")
+        let dentist = dentistAppointment(now: now)
+        add(mine, "Dentist", timed(dentist), timed(dentist.addingTimeInterval(45 * 60)), location: "Kovac Dental, Vinohradská 48")
         add(family, "Sunday lunch at Mom's", timed(at(6, 12)), timed(at(6, 15)))
         add(family, "Lisbon trip", allDay(at(10, 0)), allDay(at(13, 0)), notes: "Booking ZK4P2Q")
         add(family, "Mom's birthday", allDay(at(16, 0)), allDay(at(17, 0)), rrule: "FREQ=YEARLY")

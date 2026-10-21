@@ -18,6 +18,8 @@ struct MailHTMLView: NSViewRepresentable {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        // Email cards have a white background, regardless of the app's appearance.
+        webView.appearance = NSAppearance(named: .aqua)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
         return webView
@@ -38,10 +40,10 @@ struct MailHTMLView: NSViewRepresentable {
         return """
         <!doctype html><html><head><meta charset="utf-8">
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src \(imageSources); style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; font-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'">
-        <meta name="color-scheme" content="light dark">
+        <meta name="color-scheme" content="light">
         <style>
-        :root { color-scheme: light dark; }
-        body { font: 14px -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.55; overflow-wrap: anywhere; margin: 0; padding: 4px 0 12px; }
+        :root { color-scheme: light; }
+        body { color: #1b1b1b; background-color: #fff; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.55; overflow-wrap: anywhere; margin: 0; padding: 4px 0 12px; }
         img { max-width: 100%; height: auto; } table { max-width: 100%; } pre { white-space: pre-wrap; } a { color: #3972bf; }
         blockquote { border-left: 2px solid #aaa; padding-left: 12px; margin-left: 0; opacity: .8; }
         </style></head><body>\(html)</body></html>

@@ -81,6 +81,8 @@ private struct PowerThroughCard: View {
     @State private var expanded = false
     @State private var htmlHeight: CGFloat = 200
     @State private var inlineImages: [String: Data] = [:]
+    @State private var loadingBody = false
+    @State private var bodyError: String?
 
     private static let collapsedHeight: CGFloat = 440
     private static let railWidth: CGFloat = 84
@@ -119,13 +121,23 @@ private struct PowerThroughCard: View {
         .frame(maxWidth: .infinity, minHeight: Self.railHeight + 150, alignment: .topLeading)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 28))
         .overlay(alignment: .topTrailing) { stickyRail }
-        .task(id: message?.id) {
-            guard let message else { return }
-            for attachment in message.attachments {
-                guard let contentID = attachment.contentID, attachment.mimeType.lowercased().hasPrefix("image/"),
-                      inlineImages[contentID] == nil else { continue }
-                if let data = try? await store.attachmentData(attachment, message: message) { inlineImages[contentID] = data }
-            }
+        .task(id: message?.id) { await loadMessage() }
+    }
+
+    private func loadMessage() async {
+        guard var message else { return }
+        loadingBody = message.needsBodyHydration
+        bodyError = nil
+        defer { loadingBody = false }
+        if message.needsBodyHydration {
+            do { message = try await store.fullMessage(message) }
+            catch is CancellationError { return }
+            catch { bodyError = error.localizedDescription; return }
+        }
+        for attachment in message.attachments {
+            guard let contentID = attachment.contentID, attachment.mimeType.lowercased().hasPrefix("image/"),
+                  inlineImages[contentID] == nil else { continue }
+            if let data = try? await store.attachmentData(attachment, message: message) { inlineImages[contentID] = data }
         }
     }
 
@@ -142,7 +154,14 @@ private struct PowerThroughCard: View {
     }
 
     @ViewBuilder private var messageBody: some View {
-        if let html, let message {
+        if let bodyError {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Could not load this email: \(bodyError)").font(.callout).foregroundStyle(Theme.secondary)
+                Button("Retry") { Task { await loadMessage() } }.buttonStyle(QuietButtonStyle())
+            }
+        } else if loadingBody || message?.needsBodyHydration == true {
+            ProgressView("Loading email…")
+        } else if let html, let message {
             MailHTMLView(html: html, allowsRemoteImages: store.allowsRemoteImages(sender: message.from.email), height: $htmlHeight)
                 .frame(height: htmlHeight)
                 .frame(height: expanded ? htmlHeight : min(htmlHeight, Self.collapsedHeight), alignment: .top)
