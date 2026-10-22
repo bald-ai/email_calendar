@@ -13,7 +13,7 @@ struct MailRootView: View {
             else { store.composition = nil }
         }
     }
-    @State private var bubbleThread: MailThread?
+    @State private var bubbleRequest: BubbleRequest?
     @State private var showsScreenedSenders = false
     @State private var showsPalette = false
     @State private var showsMore = false
@@ -23,7 +23,16 @@ struct MailRootView: View {
     @State private var powerScrollRequest: String?
 
     private var mailbox: Mailbox { store.navigation }
-    private var threads: [MailThread] { store.visibleThreads(mailbox: mailbox) }
+    /// In the order the page shows them: the Imbox lists new mail above previously seen.
+    private var threads: [MailThread] {
+        let visible = store.visibleThreads(mailbox: mailbox)
+        guard mailbox == .imbox, store.searchQuery.isEmpty else { return visible }
+        return visible.filter(\.unread) + visible.filter { !$0.unread }
+    }
+    /// The Screener lists one row per sender.
+    private var isScreener: Bool { mailbox == .screener && store.searchQuery.isEmpty }
+    private var listRows: [MailThread] { isScreener ? MailScreenerView.senders(threads) : threads }
+    private var isListShowing: Bool { composition == nil && openThread == nil && !store.poweringThrough }
     private var openThread: MailThread? { store.openThread }
     private var isPowerStack: Bool { store.poweringThrough && openThread == nil }
     private var powerThreads: [MailThread] { store.newForYou }
@@ -32,6 +41,14 @@ struct MailRootView: View {
         if let openThread { return openThread }
         if isPowerStack { return powerThreads.first { $0.id == powerFocusID } ?? powerThreads.first }
         return threads.first { $0.id == store.selectedThreadID }
+    }
+    /// The picked rows when the list has any, otherwise the focused one.
+    private var targets: [MailThread] {
+        if isListShowing, !isScreener, !store.selection.isEmpty {
+            let picked = threads.filter { store.selection.contains($0.id) }
+            if !picked.isEmpty { return picked }
+        }
+        return focused.map { [$0] } ?? []
     }
     private func replyMessage(_ thread: MailThread?) -> MailMessage? {
         thread?.messages.filter { !$0.labels.contains("DRAFT") && $0.draftID == nil }.max { $0.date < $1.date }
@@ -48,15 +65,15 @@ struct MailRootView: View {
                 }
                     .id(composition.id)
             } else if let openThread {
-                MailThreadView(thread: openThread, compose: compose, bubble: { bubbleThread = openThread },
+                MailThreadView(thread: openThread, compose: compose, bubble: { bubbleRequest = BubbleRequest(threads: [openThread]) },
                                act: { action in perform(action, on: openThread) }, showsMore: $showsMore)
                     .id(openThread.id)
             } else if store.poweringThrough {
                 PowerThroughPage(threads: powerThreads, focusedID: $powerFocusID, scrollRequest: $powerScrollRequest,
-                                 compose: compose, bubble: { bubbleThread = $0 }, act: { thread, action in perform(action, on: thread) })
+                                 compose: compose, bubble: { bubbleRequest = BubbleRequest(threads: [$0]) }, act: { thread, action in perform(action, on: thread) })
             } else {
                 MailboxPage(mailbox: mailbox, threads: threads, compose: { composition = .newMessage },
-                            bubble: { bubbleThread = $0 }, showsScreenedSenders: $showsScreenedSenders)
+                            act: { action, threads in perform(action, on: threads) }, showsScreenedSenders: $showsScreenedSenders)
             }
         }
         .overlay(alignment: .bottom) {
@@ -77,13 +94,17 @@ struct MailRootView: View {
                 ProgressView("Preparing message…").padding(24).background(Theme.raised, in: RoundedRectangle(cornerRadius: 14))
             }
         }
-        .background(MailKeyboardMonitor(enabled: composition == nil && bubbleThread == nil && !showsScreenedSenders && !showsPalette && !loadingComposition,
+        .background(MailKeyboardMonitor(enabled: composition == nil && bubbleRequest == nil && !showsScreenedSenders && !showsPalette && !loadingComposition,
                                         handle: handleKey).frame(width: 0, height: 0))
-        .sheet(item: $bubbleThread) { thread in
+        .sheet(item: $bubbleRequest) { request in
             BubbleUpPicker { date in
                 Task {
-                    await store.bubbleUp(thread, date)
-                    store.advanceAfterAction(from: thread.id)
+                    if request.threads.count == 1, let thread = request.threads.first {
+                        await store.bubbleUp(thread, date)
+                        store.advanceAfterAction(from: thread.id)
+                    } else {
+                        await store.change(.bubbleUp(date), threads: request.threads)
+                    }
                 }
             }
         }
@@ -101,9 +122,19 @@ struct MailRootView: View {
             let oldIndex = oldIDs.firstIndex(of: current) ?? 0
             store.selectedThreadID = newIDs.isEmpty ? nil : newIDs[min(oldIndex, newIDs.count - 1)]
         }
+        // Picked rows that left the list (archived, moved, filtered out by a search) are no longer picked.
+        .onChange(of: listRows.map(\.id)) { _, ids in
+            let remaining = store.selection.intersection(ids)
+            if remaining != store.selection { store.selection = remaining }
+        }
     }
 
-    enum ThreadAction { case archive, setAside, trash, spam, notSpam, toggleRead, seen, moveToTodo, link }
+    enum ThreadAction { case archive, setAside, trash, spam, notSpam, toggleRead, seen, moveToTodo, link, bubbleUp }
+
+    struct BubbleRequest: Identifiable {
+        let id = UUID()
+        var threads: [MailThread]
+    }
 
     private func perform(_ action: ThreadAction, on thread: MailThread) {
         Task {
@@ -117,9 +148,31 @@ struct MailRootView: View {
             case .seen: await store.setRead(thread, true)
             case .moveToTodo: await store.moveToTodo(thread); return
             case .link: store.startLinking(thread); return
+            case .bubbleUp: bubbleRequest = BubbleRequest(threads: [thread]); return
             }
             store.advanceAfterAction(from: thread.id)
         }
+    }
+
+    /// Several threads get one batch change and one Undo; a single one takes the usual path.
+    private func perform(_ action: ThreadAction, on threads: [MailThread]) {
+        guard threads.count > 1 else {
+            if let thread = threads.first { perform(action, on: thread) }
+            return
+        }
+        let change: MailThreadChange
+        switch action {
+        case .archive: change = .archive
+        case .trash: change = .trash
+        case .spam: change = .spam
+        case .notSpam: change = .notSpam
+        case .setAside: change = .setAside(!threads.allSatisfy(\.isSetAside))
+        case .toggleRead: change = .read(threads.contains(where: \.unread))
+        case .seen: change = .read(true)
+        case .bubbleUp: bubbleRequest = BubbleRequest(threads: threads); return
+        case .moveToTodo, .link: return
+        }
+        Task { await store.change(change, threads: threads) }
     }
 
     private func compose(_ message: MailMessage, _ action: MailComposeAction) {
@@ -156,9 +209,18 @@ struct MailRootView: View {
         let character = event.charactersIgnoringModifiers?.lowercased() ?? ""
         if modifiers == .command && character == "k" { showsPalette = true; return true }
         if modifiers == .command && character == "z", store.undoMessage != nil { Task { await store.undo() }; return true }
+        if modifiers == .command && character == "a", isListShowing, !listRows.isEmpty { selectAll(); return true }
+        // ⇧J / ⇧K pick the focused row and the next one, growing the selection like ⇧-arrows in Finder.
+        if modifiers == .shift && (character == "j" || character == "k"), isListShowing, !isScreener {
+            if let current = focused { store.selection.insert(current.id) }
+            moveSelection(character == "j" ? 1 : -1)
+            if let next = store.selectedThreadID { store.selection.insert(next); store.selectionAnchor = next }
+            return true
+        }
         guard modifiers.isEmpty else { return false }
         if event.keyCode == 53 {
             if store.linkingThreadID != nil { store.cancelLinking(); return true }
+            if isListShowing, !store.selection.isEmpty { store.clearSelection(); return true }
             if store.openThreadID != nil { store.closeThread(); return true }
             if store.poweringThrough { store.endPowerThrough(); return true }
             if mailbox != .imbox { store.navigation = .imbox; return true }
@@ -170,6 +232,10 @@ struct MailRootView: View {
             return true
         }
         switch character {
+        case "x":
+            guard isListShowing, !isScreener else { return false }
+            if focused == nil { moveSelection(1) }
+            if let id = focused?.id { store.toggleSelection(id) }
         case "t": if let focused { perform(.moveToTodo, on: focused) }
         case "l": if let focused { perform(.link, on: focused) }
         case "+", "=": store.focusTodoField()
@@ -183,10 +249,10 @@ struct MailRootView: View {
                 if let focused { mailbox == .drafts && draftMessage(focused) != nil ? compose(draftMessage(focused)!, .editDraft) : store.open(focused) }
                 else { moveSelection(1) }
             }
-        case "e": if let focused { perform(.archive, on: focused) }
+        case "e": perform(.archive, on: targets)
         case "s" where isPowerStack: if let focused { perform(.seen, on: focused) }
-        case "a", "s": if let focused { perform(.setAside, on: focused) }
-        case "z", "b": if let focused { bubbleThread = focused }
+        case "a", "s": perform(.setAside, on: targets)
+        case "z", "b": perform(.bubbleUp, on: targets)
         case "r": if let message = replyMessage(focused) { compose(message, .reply) }
         case "f": if let message = replyMessage(focused) { compose(message, .forward) }
         case "m": if store.openThreadID != nil { showsMore.toggle() } else { return false }
@@ -194,6 +260,11 @@ struct MailRootView: View {
         default: return false
         }
         return true
+    }
+
+    private func selectAll() {
+        store.selection = Set(listRows.map(\.id))
+        store.selectionAnchor = listRows.first?.id
     }
 
     private var commands: [MailPaletteCommand] {
@@ -210,7 +281,20 @@ struct MailRootView: View {
         for mailbox in Mailbox.allCases {
             result.append(MailPaletteCommand(title: "Go to \(mailbox.title)", symbol: mailbox.symbol, shortcut: "") { store.navigation = mailbox })
         }
-        if let selected = focused {
+        if isListShowing, !listRows.isEmpty {
+            result.append(MailPaletteCommand(title: "Select all", symbol: "checkmark.circle", shortcut: "⌘A") { selectAll() })
+        }
+        if !store.selection.isEmpty, isListShowing {
+            result.append(MailPaletteCommand(title: "Clear selection", symbol: "xmark.circle", shortcut: "esc") { store.clearSelection() })
+        }
+        let picked = targets
+        if picked.count > 1 {
+            for command in MailBulkCommand.all(for: picked) {
+                result.append(MailPaletteCommand(title: "\(command.title.replacingOccurrences(of: "…", with: "")) (\(picked.count) selected)", symbol: command.symbol, shortcut: command.shortcut) {
+                    perform(command.action, on: picked)
+                })
+            }
+        } else if let selected = focused {
             result += [
                 MailPaletteCommand(title: "Archive thread", symbol: "archivebox", shortcut: "e") { perform(.archive, on: selected) },
                 MailPaletteCommand(title: "Move thread to Trash", symbol: "trash", shortcut: "") { perform(.trash, on: selected) },
@@ -219,7 +303,7 @@ struct MailRootView: View {
                     perform(selected.hasSpam ? .notSpam : .spam, on: selected)
                 },
                 MailPaletteCommand(title: selected.isSetAside ? "Return thread to Imbox" : "Set thread aside", symbol: "pin", shortcut: "a") { perform(.setAside, on: selected) },
-                MailPaletteCommand(title: "Bubble Up thread", symbol: "bubbles.and.sparkles", shortcut: "z") { bubbleThread = selected },
+                MailPaletteCommand(title: "Bubble Up thread", symbol: "bubbles.and.sparkles", shortcut: "z") { perform(.bubbleUp, on: selected) },
                 MailPaletteCommand(title: "Move to To-do", symbol: "checklist", shortcut: "t") { perform(.moveToTodo, on: selected) },
                 MailPaletteCommand(title: "Link to an event or to-do", symbol: "link", shortcut: "l") { perform(.link, on: selected) },
                 MailPaletteCommand(title: selected.unread ? "Mark thread read" : "Mark thread unread", symbol: "envelope", shortcut: "") { perform(.toggleRead, on: selected) }
@@ -248,10 +332,11 @@ private struct MailboxPage: View {
     var mailbox: Mailbox
     var threads: [MailThread]
     var compose: () -> Void
-    var bubble: (MailThread) -> Void
+    var act: (MailRootView.ThreadAction, [MailThread]) -> Void
     @Binding var showsScreenedSenders: Bool
 
     private var isSearch: Bool { !store.searchQuery.isEmpty }
+    private var picked: [MailThread] { threads.filter { store.selection.contains($0.id) } }
     private var setAside: [MailThread] {
         store.visibleThreads(mailbox: .setAside).sorted { $0.updatedAt > $1.updatedAt }
     }
@@ -282,7 +367,14 @@ private struct MailboxPage: View {
             .clipShape(UnevenRoundedRectangle(topLeadingRadius: 26, topTrailingRadius: 26))
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 24)
-            if mailbox == .imbox && !isSearch, let latest = setAside.first {
+            if !store.selection.isEmpty {
+                if mailbox == .screener && !isSearch {
+                    let senders = MailScreenerView.senders(threads)
+                    ScreenerSelectionBar(threads: picked, total: senders.count) { store.selection = Set(senders.map(\.id)) }
+                } else {
+                    MailSelectionBar(threads: picked, total: threads.count, selectAll: { store.selection = Set(threads.map(\.id)) }, act: act)
+                }
+            } else if mailbox == .imbox && !isSearch, let latest = setAside.first {
                 SetAsidePile(latest: latest, count: setAside.count) { store.navigation = .setAside }.padding(.bottom, 22)
             }
         }
@@ -363,28 +455,53 @@ private struct MailboxPage: View {
         }
     }
 
+    /// A plain click opens the email, unless rows are picked: then, like ⌘-click, it picks or unpicks.
+    private func click(_ thread: MailThread) {
+        let modifiers = NSEvent.modifierFlags
+        if modifiers.contains(.shift) { store.extendSelection(to: thread.id, in: self.threads.map(\.id)) }
+        else if modifiers.contains(.command) || !store.selection.isEmpty { store.toggleSelection(thread.id) }
+        else { store.open(thread) }
+    }
+
     private func rows(_ threads: [MailThread]) -> some View {
         LazyVStack(spacing: 2) {
             ForEach(threads) { thread in
                 MailThreadRow(thread: thread, mailbox: mailbox, isFocused: store.selectedThreadID == thread.id,
-                              isLinked: store.isLinked(thread.id))
-                    .onTapGesture { store.open(thread) }
+                              isLinked: store.isLinked(thread.id), isPicked: store.selection.contains(thread.id),
+                              pick: { store.toggleSelection(thread.id) })
+                    .onTapGesture { click(thread) }
                     .draggableThread(thread)
                     .contextMenu {
-                        Button("Move to To-do") { Task { await store.moveToTodo(thread) } }
-                        Button("Link to an Event or To-do…") { store.startLinking(thread) }
-                        Divider()
-                        Button("Archive") { Task { await store.archive(thread) } }
-                        Button(thread.unread ? "Mark read" : "Mark unread") { Task { await store.setRead(thread, thread.unread) } }
-                        Button(thread.isSetAside ? "Return to Imbox" : "Set Aside") { Task { await store.toggleSetAside(thread) } }
-                        Button("Bubble Up…") { bubble(thread) }
-                        Divider()
-                        if thread.hasSpam { Button("Not Spam") { Task { await store.notSpam(thread) } } }
-                        else { Button("Move to Spam") { Task { await store.moveToSpam(thread) } } }
-                        Button("Move to Trash", role: .destructive) { Task { await store.trash(thread) } }
+                        if store.selection.contains(thread.id) && picked.count > 1 {
+                            let group = picked
+                            Section("\(group.count) emails") {
+                                ForEach(MailBulkCommand.all(for: group)) { command in
+                                    if command.action == .trash { Divider() }
+                                    Button(command.title, role: command.action == .trash ? .destructive : nil) { act(command.action, group) }
+                                }
+                            }
+                        } else {
+                            singleMenu(thread)
+                        }
                     }
             }
         }
+    }
+
+    @ViewBuilder private func singleMenu(_ thread: MailThread) -> some View {
+        Button("Move to To-do") { Task { await store.moveToTodo(thread) } }
+        Button("Link to an Event or To-do…") { store.startLinking(thread) }
+        Divider()
+        Button("Archive") { Task { await store.archive(thread) } }
+        Button(thread.unread ? "Mark read" : "Mark unread") { Task { await store.setRead(thread, thread.unread) } }
+        Button(thread.isSetAside ? "Return to Imbox" : "Set Aside") { Task { await store.toggleSetAside(thread) } }
+        Button("Bubble Up…") { act(.bubbleUp, [thread]) }
+        Divider()
+        if thread.hasSpam { Button("Not Spam") { Task { await store.notSpam(thread) } } }
+        else { Button("Move to Spam") { Task { await store.moveToSpam(thread) } } }
+        Button("Move to Trash", role: .destructive) { Task { await store.trash(thread) } }
+        Divider()
+        Button("Select") { store.toggleSelection(thread.id) }
     }
 }
 
@@ -421,12 +538,20 @@ struct MailThreadRow: View {
     var isFocused = false
     /// Attached to an event or to-do.
     var isLinked = false
+    /// Picked for an action on several emails at once.
+    var isPicked = false
+    /// Shown on hover in place of the avatar, so rows can be picked without a modifier key.
+    var pick: (() -> Void)?
     @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 10) {
             Circle().fill(thread.unread ? Theme.unread : .clear).frame(width: 6, height: 6)
-            Avatar(name: personName, key: personKey)
+            if let pick, isPicked || hovering {
+                PickCircle(isPicked: isPicked, size: 34, action: pick)
+            } else {
+                Avatar(name: personName, key: personKey)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     if thread.bubbledAt != nil && mailbox == .imbox {
@@ -449,10 +574,11 @@ struct MailThreadRow: View {
             Text(trailing).font(.system(size: 12.5)).foregroundStyle(thread.bubbleUpAt != nil ? Theme.unread : Theme.secondary)
         }
         .padding(.horizontal, 6).padding(.vertical, 9)
-        .background(hovering || isFocused ? Theme.hover : .clear, in: RoundedRectangle(cornerRadius: 10))
+        .background(isPicked ? Theme.accent.opacity(0.16) : hovering || isFocused ? Theme.hover : .clear, in: RoundedRectangle(cornerRadius: 10))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isPicked ? .isSelected : [])
     }
 
     private var isOutgoing: Bool { mailbox == .sent || mailbox == .drafts }

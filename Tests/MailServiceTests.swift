@@ -329,6 +329,70 @@ final class MailServiceTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(snapshot.rules.first(where: { $0.key == "known@example.com" })?.decision, .approved)
     }
 
+    func testArchivingSeveralThreadsIsUndoneAsOne() async throws {
+        let (service, _, server, account) = try fixture()
+        server.addInbound(id: "third", from: "third@example.com")
+        _ = try await service.sync(account: account)
+        let ids = ["known", "unknown", "third"]
+        let token = try await service.change(.archive, threadIDs: ids, account: account)
+        XCTAssertEqual(token.message, "Archived 3 emails")
+        XCTAssertNil(token.warning)
+        for id in ids { XCTAssertEqual(server.labels(messageID: id), ["UNREAD"], id) }
+        try await service.undo(tokenID: token.id, account: account)
+        for id in ids { XCTAssertEqual(server.labels(messageID: id), ["INBOX", "UNREAD"], id) }
+    }
+
+    func testBatchKeepsGoingPastAFailureAndSaysSo() async throws {
+        let (service, _, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        server.failOneMutation()
+        let token = try await service.change(.spam, threadIDs: ["known", "unknown"], account: account)
+        XCTAssertEqual(token.message, "Moved 1 email to Spam")
+        XCTAssertTrue(try XCTUnwrap(token.warning).hasPrefix("1 of 2 couldn’t be changed"))
+        XCTAssertTrue(server.labels(messageID: "known").contains("INBOX"))
+        XCTAssertEqual(server.labels(messageID: "unknown"), ["SPAM", "UNREAD"])
+        try await service.undo(tokenID: token.id, account: account)
+        XCTAssertEqual(server.labels(messageID: "unknown"), ["INBOX", "UNREAD"])
+
+        server.failOneMutation()
+        do {
+            _ = try await service.change(.archive, threadIDs: ["known"], account: account)
+            XCTFail("A batch where everything fails must throw")
+        } catch let error as GoogleAPIError { XCTAssertEqual(error.statusCode, 500) }
+    }
+
+    func testSetAsideOnAMixedSelectionLeavesSetAsideMailAlone() async throws {
+        let (service, _, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        _ = try await service.toggleSetAside(threadID: "known", account: account)
+        let token = try await service.change(.setAside(true), threadIDs: ["known", "unknown"], account: account)
+        XCTAssertEqual(token.message, "Set aside 2 emails")
+        XCTAssertEqual(server.labels(messageID: "known"), ["aside", "UNREAD"])
+        XCTAssertEqual(server.labels(messageID: "unknown"), ["aside", "UNREAD"])
+        try await service.undo(tokenID: token.id, account: account)
+        XCTAssertEqual(server.labels(messageID: "known"), ["aside", "UNREAD"])
+        XCTAssertEqual(server.labels(messageID: "unknown"), ["INBOX", "UNREAD"])
+    }
+
+    func testScreeningOutSeveralSendersIsUndoneAsOne() async throws {
+        let (service, store, server, account) = try fixture()
+        try await markInboxSeeded(store, account)
+        server.addInbound(id: "stranger", from: "stranger@elsewhere.net")
+        _ = try await service.sync(account: account)
+        let senders = ["new@example.net", "stranger@elsewhere.net"]
+        let token = try await service.decide(senders: senders, decision: .blocked, account: account)
+        XCTAssertEqual(token.message, "Screened out 2 senders")
+        XCTAssertEqual(server.filterCount, 2)
+        XCTAssertTrue(server.labels(messageID: "unknown").contains("out"))
+        XCTAssertTrue(server.labels(messageID: "stranger").contains("out"))
+        try await service.undo(tokenID: token.id, account: account)
+        XCTAssertEqual(server.filterCount, 0)
+        XCTAssertTrue(server.labels(messageID: "unknown").contains("screen"))
+        XCTAssertTrue(server.labels(messageID: "stranger").contains("screen"))
+        let rules = try await service.cached(accountID: account.id).rules
+        XCTAssertFalse(rules.contains { senders.contains($0.key) })
+    }
+
     func testDomainRejectionOverridesSeededAddressAndUndoRestoresIt() async throws {
         let (service, _, server, account) = try fixture()
         _ = try await service.sync(account: account)

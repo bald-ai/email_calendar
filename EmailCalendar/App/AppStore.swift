@@ -13,9 +13,16 @@ final class AppStore {
     var calendars: [CalendarRecord] = []
     var events: [CalendarEvent] = []
     var navigation: Mailbox = .imbox {
-        didSet { if navigation != oldValue { poweringThrough = false } }
+        didSet { if navigation != oldValue { poweringThrough = false; clearSelection() } }
     }
+    /// The row the keyboard points at.
     var selectedThreadID: String?
+    /// Rows picked with ⌘-click, ⇧-click or x. While any are picked, actions apply to all of them.
+    var selection: Set<String> = []
+    /// Where a ⇧-click range starts: the last row picked.
+    @ObservationIgnored var selectionAnchor: String?
+    /// A change to several emails or senders is running.
+    var isApplyingBatch = false
     /// The thread shown as a full page; nil shows the mailbox list.
     var openThreadID: String?
     /// "Power Through New": new Imbox mail as one scrolling stack of cards, instead of the list.
@@ -255,7 +262,7 @@ final class AppStore {
         for timer in pendingTimers.values { timer.cancel() }
         pendingTimers = [:]; pendingSends = []; checkingPendingSends = []; sentConfirmation = nil
         searchTask?.cancel(); searchTask = nil; searchGeneration += 1; searchNextPageToken = nil; isSearching = false
-        searchQuery = ""; undoMessage = nil; undoID = nil; undoFollowUp = nil; localUndo = nil; undoTask?.cancel()
+        searchQuery = ""; clearSelection(); undoMessage = nil; undoID = nil; undoFollowUp = nil; localUndo = nil; undoTask?.cancel()
         await mail?.cancelAllOperations()
         await calendarService?.cancelAllOperations()
         do {
@@ -536,6 +543,44 @@ final class AppStore {
         guard account?.id == thread.accountID else { return }
         await performMailAction { mail, account in try await mail.bubbleUp(threadID: thread.id, date: date, account: account) }
     }
+    // MARK: Selection
+
+    func toggleSelection(_ id: String) {
+        if selection.remove(id) == nil { selection.insert(id) }
+        selectionAnchor = id
+    }
+
+    /// ⇧-click: picks every row from the anchor to this one, in the order the list shows them.
+    func extendSelection(to id: String, in order: [String]) {
+        guard let anchor = selectionAnchor ?? selectedThreadID, let start = order.firstIndex(of: anchor),
+              let end = order.firstIndex(of: id) else { return toggleSelection(id) }
+        selection.formUnion(order[min(start, end)...max(start, end)])
+        selectedThreadID = id
+    }
+
+    func clearSelection() {
+        selection = []
+        selectionAnchor = nil
+    }
+
+    /// One change to several threads, with a single Undo.
+    @discardableResult
+    func change(_ change: MailThreadChange, threads: [MailThread]) async -> Bool {
+        let ids = threads.filter { $0.accountID == account?.id }.map(\.id)
+        guard !ids.isEmpty, !isApplyingBatch else { return false }
+        isApplyingBatch = true
+        defer { isApplyingBatch = false }
+        return await performMailAction { mail, account in try await mail.change(change, threadIDs: ids, account: account) }
+    }
+
+    /// The Screener's Yes or No for several senders, with a single Undo.
+    func decideSenders(keys: [String], decision: ScreeningDecision) async {
+        guard !keys.isEmpty, !isApplyingBatch else { return }
+        isApplyingBatch = true
+        defer { isApplyingBatch = false }
+        await performMailAction { mail, account in try await mail.decide(senders: keys, decision: decision, account: account) }
+    }
+
     func decideSender(key: String, decision: ScreeningDecision) async {
         await performMailAction { mail, account in
             try await mail.decide(sender: key, decision: decision, domain: key.hasPrefix("@"), account: account)

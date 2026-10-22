@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import SwiftUI
 
 struct MailScreenerView: View {
@@ -6,7 +7,10 @@ struct MailScreenerView: View {
     var threads: [MailThread]
     var select: (MailThread) -> Void
 
-    private var senders: [MailThread] {
+    private var senders: [MailThread] { Self.senders(threads) }
+
+    /// One row per sender: their latest email, newest first.
+    static func senders(_ threads: [MailThread]) -> [MailThread] {
         Dictionary(grouping: threads, by: { $0.sender.email.lowercased() }).values
             .compactMap { $0.max { $0.updatedAt < $1.updatedAt } }.sorted { $0.updatedAt > $1.updatedAt }
     }
@@ -19,8 +23,15 @@ struct MailScreenerView: View {
             }.padding(.top, 40)
         } else {
             LazyVStack(spacing: 4) {
-                ForEach(senders) { thread in
-                    ScreenerSenderRow(thread: thread) { select(thread) }
+                let rows = senders
+                ForEach(rows) { thread in
+                    ScreenerSenderRow(thread: thread, isPicked: store.selection.contains(thread.id)) {
+                        // Same as mail rows: ⇧ picks a range, ⌘ (or any click while some are picked) picks one.
+                        let modifiers = NSEvent.modifierFlags
+                        if modifiers.contains(.shift) { store.extendSelection(to: thread.id, in: rows.map(\.id)) }
+                        else if modifiers.contains(.command) || !store.selection.isEmpty { store.toggleSelection(thread.id) }
+                        else { select(thread) }
+                    }
                 }
             }
         }
@@ -30,6 +41,7 @@ struct MailScreenerView: View {
 private struct ScreenerSenderRow: View {
     @Environment(AppStore.self) private var store
     var thread: MailThread
+    var isPicked = false
     var select: () -> Void
     @State private var entireDomain = false
     @State private var isDeciding = false
@@ -41,7 +53,11 @@ private struct ScreenerSenderRow: View {
         HStack(spacing: 12) {
             Button(action: select) {
                 HStack(spacing: 12) {
-                    Avatar(name: thread.sender.displayName, key: thread.sender.email, size: 38)
+                    if isPicked || hovering {
+                        PickCircle(isPicked: isPicked, size: 38) { store.toggleSelection(thread.id) }
+                    } else {
+                        Avatar(name: thread.sender.displayName, key: thread.sender.email, size: 38)
+                    }
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
                             Text(thread.sender.displayName).font(.system(size: 15, weight: .semibold)).lineLimit(1)
@@ -59,12 +75,13 @@ private struct ScreenerSenderRow: View {
             Button { decide(.blocked) } label: { Label("No", systemImage: "hand.thumbsdown.fill") }
                 .buttonStyle(PillButtonStyle(fill: Theme.no)).help("Screen them out, also in Gmail")
         }
-        .disabled(isDeciding)
+        .disabled(isDeciding || store.isApplyingBatch)
         .padding(.horizontal, 10).padding(.vertical, 10)
-        .background(hovering ? Theme.hover : .clear, in: RoundedRectangle(cornerRadius: 12))
+        .background(isPicked ? Theme.accent.opacity(0.16) : hovering ? Theme.hover : .clear, in: RoundedRectangle(cornerRadius: 12))
         .onHover { hovering = $0 }
         .contextMenu {
             Toggle("Decide for everyone @\(domain)", isOn: $entireDomain)
+            Button(isPicked ? "Unselect" : "Select") { store.toggleSelection(thread.id) }
         }
     }
 

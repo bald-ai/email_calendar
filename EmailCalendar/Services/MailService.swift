@@ -111,6 +111,28 @@ struct MailUndoToken: Identifiable, Sendable {
     var warning: String? = nil
 }
 
+/// One change applied to several selected threads at once.
+enum MailThreadChange: Sendable, Equatable {
+    case archive, trash, spam, notSpam, read(Bool), setAside(Bool), bubbleUp(Date)
+
+    func message(count: Int) -> String {
+        let emails = count == 1 ? "1 email" : "\(count) emails"
+        switch self {
+        case .archive: return "Archived \(emails)"
+        case .trash: return "Moved \(emails) to Trash"
+        case .spam: return "Moved \(emails) to Spam"
+        case .notSpam: return "Not spam: moved \(emails) to Imbox"
+        case .read(let read): return "Marked \(emails) \(read ? "read" : "unread")"
+        case .setAside(let aside): return aside ? "Set aside \(emails)" : "Returned \(emails) to Imbox"
+        case .bubbleUp: return "\(emails) will bubble up later".capitalizedFirstLetter
+        }
+    }
+}
+
+private extension String {
+    var capitalizedFirstLetter: String { prefix(1).uppercased() + dropFirst() }
+}
+
 /// Gmail owns labels and message content. SQLite owns sender decisions, timers and the cache.
 actor MailService {
     private static let specialLabels = ["HEY/Set Aside", "HEY/Bubble Up", "HEY/Screener", "HEY/Screened Out"]
@@ -236,6 +258,14 @@ actor MailService {
     }
     func decide(sender: String, decision: ScreeningDecision, domain: Bool = false, account: Account) async throws -> MailUndoToken {
         try await serialized(accountID: account.id) { try await self.decideImpl(sender: sender, decision: decision, domain: domain, account: account) }
+    }
+    /// Applies one change to every thread, undone together. Threads that fail are skipped and counted in the warning.
+    func change(_ change: MailThreadChange, threadIDs: [String], account: Account) async throws -> MailUndoToken {
+        try await serialized(accountID: account.id) { try await self.changeImpl(change, threadIDs: threadIDs, account: account) }
+    }
+    /// The Screener's Yes or No for several senders at once, undone together.
+    func decide(senders: [String], decision: ScreeningDecision, account: Account) async throws -> MailUndoToken {
+        try await serialized(accountID: account.id) { try await self.decideImpl(senders: senders, decision: decision, account: account) }
     }
     func undo(tokenID: UUID, account: Account) async throws {
         guard let action = undoActions[tokenID], action.accountID == account.id, action.token.expiresAt > .now else { throw MailError.expiredUndo }
@@ -553,17 +583,21 @@ actor MailService {
         try await move(threadID: threadID, adding: unread ? ["UNREAD"] : [], removing: unread ? [] : ["UNREAD"], message: unread ? "Marked unread" : "Marked read", account: account)
     }
 
-    private func toggleSetAsideImpl(threadID: String, account: Account) async throws -> MailUndoToken {
+    /// Toggles, or with a target moves the thread there (a thread already there is left alone).
+    private func toggleSetAsideImpl(threadID: String, to target: Bool? = nil, account: Account) async throws -> MailUndoToken {
         try await prepare(account: account)
         let state = try await capture(threadID: threadID, account: account)
         let isSetAside = state.messages.contains { $0.labels.contains("HEY/Set Aside") }
-        _ = try await changeLabels(threadID: threadID, adding: isSetAside ? ["INBOX"] : ["HEY/Set Aside"],
-                                   removing: isSetAside ? ["HEY/Set Aside"] : ["INBOX", "HEY/Bubble Up"], account: account)
-        if !isSetAside {
-            try await store.remove(id: threadID, collection: "bubbles", accountID: account.id)
-            _ = try await refresh(threadID: threadID, accountID: account.id)
+        let setAside = target ?? !isSetAside
+        if setAside != isSetAside {
+            _ = try await changeLabels(threadID: threadID, adding: setAside ? ["HEY/Set Aside"] : ["INBOX"],
+                                       removing: setAside ? ["INBOX", "HEY/Bubble Up"] : ["HEY/Set Aside"], account: account)
+            if setAside {
+                try await store.remove(id: threadID, collection: "bubbles", accountID: account.id)
+                _ = try await refresh(threadID: threadID, accountID: account.id)
+            }
         }
-        return register(message: isSetAside ? "Returned to Imbox" : "Set aside", threads: [state], accountID: account.id)
+        return register(message: setAside ? "Set aside" : "Returned to Imbox", threads: [state], accountID: account.id)
     }
 
     private func bubbleUpImpl(threadID: String, date: Date, account: Account) async throws -> MailUndoToken {
@@ -668,6 +702,62 @@ actor MailService {
             try await replaceRules(keys: action.affectedRuleKeys, target: action.previousRules, account: account)
         }
         for state in action.threads { try await restoreThread(state, account: account) }
+    }
+
+    private func changeImpl(_ change: MailThreadChange, threadIDs: [String], account: Account) async throws -> MailUndoToken {
+        try await batch(threadIDs, message: change.message(count:), account: account) { id in
+            switch change {
+            case .archive: try await self.archiveImpl(threadID: id, account: account)
+            case .trash: try await self.trashImpl(threadID: id, account: account)
+            case .spam: try await self.moveToSpamImpl(threadID: id, account: account)
+            case .notSpam: try await self.notSpamImpl(threadID: id, account: account)
+            case .read(let read): try await self.markUnreadImpl(threadID: id, unread: !read, account: account)
+            case .setAside(let aside): try await self.toggleSetAsideImpl(threadID: id, to: aside, account: account)
+            case .bubbleUp(let date): try await self.bubbleUpImpl(threadID: id, date: date, account: account)
+            }
+        }
+    }
+
+    private func decideImpl(senders: [String], decision: ScreeningDecision, account: Account) async throws -> MailUndoToken {
+        let message = { (count: Int) in
+            let senders = count == 1 ? "1 sender" : "\(count) senders"
+            return decision == .approved ? "Approved \(senders)" : "Screened out \(senders)"
+        }
+        return try await batch(senders, message: message, account: account) { key in
+            try await self.decideImpl(sender: key, decision: decision, domain: key.hasPrefix("@"), account: account)
+        }
+    }
+
+    /// Runs one step per item, then folds their undo records into one, so a single Undo reverses the whole batch.
+    /// A failing item doesn't stop the rest; only when every item fails does the batch throw.
+    private func batch(_ items: [String], message: (Int) -> String, account: Account,
+                       _ step: (String) async throws -> MailUndoToken) async throws -> MailUndoToken {
+        var tokens: [MailUndoToken] = [], firstError: Error?
+        for item in items {
+            do { tokens.append(try await step(item)) } catch { firstError = firstError ?? error }
+        }
+        if tokens.isEmpty, let firstError { throw firstError }
+        let failed = items.count - tokens.count
+        if tokens.count == 1, failed == 0 { return tokens[0] }
+        var threads: [ThreadState] = [], seenThreads = Set<String>(), ruleKeys = Set<String>(), previousRules: [SenderRule] = []
+        var warnings: [String] = []
+        for token in tokens {
+            if let warning = token.warning, !warnings.contains(warning) { warnings.append(warning) }
+            guard let action = undoActions.removeValue(forKey: token.id) else { continue }
+            // The first record of a thread or sender rule holds its state from before the batch.
+            for state in action.threads where seenThreads.insert(state.id).inserted { threads.append(state) }
+            let newKeys = action.affectedRuleKeys.subtracting(ruleKeys)
+            previousRules += action.previousRules.filter { newKeys.contains($0.key) }
+            ruleKeys.formUnion(newKeys)
+        }
+        if let firstError {
+            warnings.insert("\(failed) of \(items.count) couldn’t be changed: \(firstError.localizedDescription)", at: 0)
+        }
+        let token = register(message: message(tokens.count), threads: threads, accountID: account.id,
+                             warning: warnings.isEmpty ? nil : warnings.joined(separator: "\n"))
+        undoActions[token.id]?.affectedRuleKeys = ruleKeys
+        undoActions[token.id]?.previousRules = previousRules
+        return token
     }
 
     private func setRemoteImagesImpl(sender: String, allowed: Bool, account: Account) async throws {
