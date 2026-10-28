@@ -9,6 +9,11 @@ struct MailHTMLView: NSViewRepresentable {
     var html: String
     var allowsRemoteImages: Bool
     @Binding var height: CGFloat
+    /// Space around the email inside the page, painted in the email's own background.
+    var inset: CGFloat = 0
+    /// When given, the email's own background at its edges (gray around a newsletter, say) also fills
+    /// the inset and is reported here, so the sheet around the email can match it. Nil while plain white.
+    var edgeColor: Binding<Color?>?
 
     func makeCoordinator() -> Coordinator { Coordinator(height: $height) }
 
@@ -30,15 +35,21 @@ struct MailHTMLView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: MeasuringWebView, context: Context) {
-        context.coordinator.height = $height
-        let document = Self.document(html: html, allowsRemoteImages: allowsRemoteImages)
-        guard context.coordinator.document != document else { return }
-        context.coordinator.document = document
-        webView.loadHTMLString(document, baseURL: nil)
+        let coordinator = context.coordinator
+        coordinator.height = $height
+        coordinator.edgeColor = edgeColor
+        coordinator.inset = inset
+        // Compared by input, so redrawing the page around an email never rebuilds or reloads it.
+        let content = Coordinator.Content(html: html, allowsRemoteImages: allowsRemoteImages, inset: inset)
+        guard coordinator.content != content else { return }
+        coordinator.content = content
+        webView.loadHTMLString(Self.document(html: html, allowsRemoteImages: allowsRemoteImages, inset: inset), baseURL: nil)
     }
 
-    static func document(html: String, allowsRemoteImages: Bool) -> String {
+    static func document(html: String, allowsRemoteImages: Bool, inset: CGFloat = 0) -> String {
         let imageSources = allowsRemoteImages ? "data: https: http:" : "data:"
+        let side = Int(inset.rounded())
+        let padding = side > 0 ? "\(side - 6)px \(side)px" : "4px 0 12px"
         // The CSP is the first element, and applies to inline CSS image URLs as
         // well as img elements. A message cannot relax it with another policy.
         return """
@@ -47,7 +58,7 @@ struct MailHTMLView: NSViewRepresentable {
         <meta name="color-scheme" content="light">
         <style>
         :root { color-scheme: light; }
-        body { color: #1b1b1b; background-color: #fff; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.55; overflow-wrap: anywhere; margin: 0; padding: 4px 0 12px; }
+        body { color: #1b1b1b; background-color: #fff; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.55; overflow-wrap: anywhere; margin: 0; padding: \(padding); }
         img { max-width: 100%; height: auto; } table { max-width: 100%; } pre { white-space: pre-wrap; } a { color: #3972bf; }
         blockquote { border-left: 2px solid #aaa; padding-left: 12px; margin-left: 0; opacity: .8; }
         </style></head><body>\(html)</body></html>
@@ -56,8 +67,16 @@ struct MailHTMLView: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
-        var document = ""
+        struct Content: Equatable {
+            var html: String
+            var allowsRemoteImages: Bool
+            var inset: CGFloat
+        }
+
+        var content: Content?
         var height: Binding<CGFloat>
+        var edgeColor: Binding<Color?>?
+        var inset: CGFloat = 0
 
         init(height: Binding<CGFloat>) { self.height = height }
 
@@ -77,13 +96,77 @@ struct MailHTMLView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { measure(webView) }
 
+        /// App-owned expressions; email scripts remain disabled. An email wider than the view (a 700px
+        /// newsletter beside an open drawer) is scaled to fit, as Mail does, rather than cut off at the side.
         func measure(_ webView: WKWebView) {
-            // This app-owned expression measures content; email scripts remain disabled.
-            // Give the web view its full height so the enclosing mail page is the only scroller.
-            webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { [weak self] result, _ in
-                guard let number = result as? NSNumber else { return }
-                Task { @MainActor in self?.height.wrappedValue = max(number.doubleValue, 80) }
+            webView.pageZoom = 1
+            // The overflow ends at the content's edge, so the inset on that side is added back.
+            let room = Double(inset.rounded()) + 2
+            let widths = "[document.documentElement.scrollWidth, document.documentElement.clientWidth]"
+            webView.evaluateJavaScript(widths) { [weak self] result, _ in
+                guard let widths = result as? [NSNumber], widths.count == 2,
+                      widths[0].doubleValue > widths[1].doubleValue else {
+                    Task { @MainActor in self?.measureHeight(webView, zoom: 1) }
+                    return
+                }
+                let fit = min(1, max(0.5, widths[1].doubleValue / (widths[0].doubleValue + room)))
+                Task { @MainActor in
+                    webView.pageZoom = fit
+                    self?.measureHeight(webView, zoom: fit)
+                }
             }
+        }
+
+        private func measureHeight(_ webView: WKWebView, zoom: Double) {
+            // The body's own height, not the document's: the document is never shorter than the view,
+            // so a short email could never shrink it.
+            let height = "Math.ceil(document.body.scrollHeight)"
+            guard edgeColor != nil else {
+                webView.evaluateJavaScript(height) { [weak self] result, _ in
+                    guard let number = result as? NSNumber else { return }
+                    Task { @MainActor in self?.height.wrappedValue = max(number.doubleValue * zoom, 60) }
+                }
+                return
+            }
+            webView.evaluateJavaScript(Self.edgeScript(inset: inset, height: height)) { [weak self] result, _ in
+                guard let values = result as? [Any], let number = values.first as? NSNumber else { return }
+                let color = (values.last as? String).flatMap(Self.color(css:))
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.height.wrappedValue = max(number.doubleValue * zoom, 60)
+                    if self.edgeColor?.wrappedValue != color { self.edgeColor?.wrappedValue = color }
+                }
+            }
+        }
+
+        /// Finds a background that runs the full width and nearly the full height of the email (a newsletter's
+        /// gray surround) and paints the body with it, so the inset doesn't frame the email in white.
+        private static func edgeScript(inset: CGFloat, height: String) -> String {
+            let probe = Int(inset.rounded()) + 6
+            return """
+            (() => {
+              const body = document.body, total = body.scrollHeight;
+              let edge = '', node = document.elementFromPoint(\(probe), \(probe));
+              while (node && node !== body && node !== document.documentElement) {
+                const color = getComputedStyle(node).backgroundColor;
+                if (color && color !== 'transparent' && !/rgba\\(.*,\\s*0\\)$/.test(color)) {
+                  const box = node.getBoundingClientRect();
+                  if (box.width >= body.clientWidth - \(probe * 2) && box.height >= total * 0.8) edge = color;
+                  break;
+                }
+                node = node.parentElement;
+              }
+              if (edge) { body.style.backgroundColor = edge; document.documentElement.style.backgroundColor = edge; }
+              return [\(height), edge];
+            })()
+            """
+        }
+
+        /// "rgb(238, 238, 238)" from computed style; nil for white, which is the sheet's own color.
+        static func color(css: String) -> Color? {
+            let parts = css.split(whereSeparator: { !"0123456789.".contains($0) }).compactMap { Double($0) }
+            guard parts.count >= 3, parts.prefix(3) != [255, 255, 255] else { return nil }
+            return Color(red: parts[0] / 255, green: parts[1] / 255, blue: parts[2] / 255)
         }
     }
 }
@@ -92,35 +175,14 @@ struct MailHTMLView: NSViewRepresentable {
 final class MeasuringWebView: WKWebView {
     var onWidthChange: (() -> Void)?
     private var measuredWidth: CGFloat = 0
-    private var scrollMonitor: Any?
 
-    override func viewWillMove(toWindow newWindow: NSWindow?) {
-        if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor); self.scrollMonitor = nil }
-        super.viewWillMove(toWindow: newWindow)
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard window != nil else { return }
-        // WebKit's internal scroll view otherwise catches wheel and trackpad events
-        // even when the entire email is already visible in the surrounding page.
-        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            let handled = MainActor.assumeIsolated {
-                guard let self, let window = self.window, event.window === window,
-                      let content = window.contentView,
-                      let hit = content.hitTest(content.convert(event.locationInWindow, from: nil)),
-                      hit === self || hit.isDescendant(of: self) else { return false }
-                var ancestor = self.superview
-                while let view = ancestor {
-                    if let scrollView = view as? NSScrollView {
-                        scrollView.scrollWheel(with: event)
-                        return true
-                    }
-                    ancestor = view.superview
-                }
-                return false
-            }
-            return handled ? nil : event
+    /// The email is laid out at its full height, so vertical scrolling belongs to the page around it.
+    /// Sideways scrolling stays with the email, for the odd one wider than its sheet.
+    override func scrollWheel(with event: NSEvent) {
+        if abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX) {
+            nextResponder?.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
         }
     }
 

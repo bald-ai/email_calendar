@@ -188,32 +188,5 @@ extension AppStore {
         drawerPosition = -1
         todoFieldRequest = UUID()
     }
-
-    // MARK: Demo
-
-    /// Demo mode starts with a few to-dos and links, so the drawers show what they are for.
-    func seedDemoPlannerIfNeeded() async {
-        guard isDemoMode, let account, let plannerService else { return }
-        do {
-            guard try await plannerService.isSeeded(accountID: account.id) == false else { return }
-            let now = Date.now
-            let invoice = TodoItem(title: "Send the October invoice to the client", createdAt: now)
-            let birthday = TodoItem(title: "Book a table for Mom's birthday", createdAt: now.addingTimeInterval(-60))
-            let passport = TodoItem(title: "Renew passport before Lisbon", note: "The photo booth at Národní 20 is the quickest.",
-                                    createdAt: now.addingTimeInterval(-120))
-            let boiler = TodoItem(title: "Pay the boiler technician", createdAt: now.addingTimeInterval(-3_600),
-                                  completedAt: now.addingTimeInterval(-1_800))
-            for todo in [invoice, birthday, passport, boiler] { try await plannerService.save(todo, accountID: account.id) }
-            if let trip = thread(id: "t-trip") {
-                try await plannerService.add(makeLink(trip, .todo(passport.id), title: passport.title, start: nil), accountID: account.id)
-            }
-            if let climb = thread(id: "t-climb"),
-               let event = events.filter({ $0.title == "Climbing with Tom" }).min(by: { $0.start < $1.start }) {
-                try await plannerService.add(makeLink(climb, .event(event.cacheID), title: event.title, start: event.start), accountID: account.id)
-            }
-            try await plannerService.markSeeded(accountID: account.id)
-            await reloadPlanner(account.id)
-        } catch { reportError(error) }
-    }
 }
 #endif

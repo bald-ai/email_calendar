@@ -6,6 +6,19 @@ struct DraftRecovery: Codable, Sendable, Equatable {
     var buffer: DraftSession.Buffer
 }
 
+extension LocalStore {
+    /// A parked draft can finish saving while a different composer owns the crash checkpoint.
+    func removeDraftRecovery(ifMatching outgoing: OutgoingMessage, accountID: String) throws {
+        guard let recovery = try metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: accountID) else { return }
+        let saved = recovery.buffer.message
+        let sameMessage = outgoing.rfcMessageID.map { $0 == saved.rfcMessageID } ?? false
+        let sameDraft = outgoing.draftID.map { $0 == saved.draftID } ?? false
+        guard sameMessage || sameDraft else { return }
+        // Keep the identity check and deletion in one database actor turn.
+        try removeMetadata(key: DraftRecovery.metadataKey, accountID: accountID)
+    }
+}
+
 /// An email closed while Gmail couldn't be reached. It stays on this Mac until a later refresh saves it to Gmail.
 struct ParkedDraft: Codable, Sendable, Equatable {
     static let collection = "parkedDrafts"

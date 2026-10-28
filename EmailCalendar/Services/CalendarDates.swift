@@ -1,6 +1,14 @@
 import Foundation
 
 enum CalendarDates {
+    static func overlaps(_ event: CalendarEvent, day: Date, calendar: Calendar) -> Bool {
+        let start = calendar.startOfDay(for: day)
+        let end = calendar.date(byAdding: .day, value: 1, to: start)!
+        guard event.end >= event.start else { return false }
+        if event.start == event.end { return event.start >= start && event.start < end }
+        return event.start < end && event.end > start
+    }
+
     static func day(_ text: String, calendar: Calendar) -> Date? {
         let values = text.split(separator: "-", omittingEmptySubsequences: false)
         guard values.count == 3, values[0].count == 4, values[1].count == 2, values[2].count == 2,

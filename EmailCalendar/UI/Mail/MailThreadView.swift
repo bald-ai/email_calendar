@@ -1,10 +1,12 @@
 #if os(macOS)
 import AppKit
+import Observation
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct MailThreadView: View {
     @Environment(AppStore.self) private var store
+    @Environment(MailSenderPresentation.self) private var senderPresentation
     var thread: MailThread
     var compose: (MailMessage, MailComposeAction) -> Void
     var bubble: () -> Void
@@ -37,11 +39,11 @@ struct MailThreadView: View {
                         }
                     }.padding(.top, 14)
                     SubjectHeaderLayout(capCenter: NSFont.systemFont(ofSize: 30, weight: .bold).capHeight / 2) {
-                        Button { store.closeThread() } label: {
+                        Button { if !senderPresentation.dismiss() { store.closeThread() } } label: {
                             Label(store.threadBackTitle, systemImage: "chevron.left").labelStyle(.titleAndIcon)
                         }
                         .buttonStyle(PillButtonStyle(fill: Theme.back, foreground: Color(hex: 0x10372B)))
-                        .help("Back (Esc)")
+                        .help("\(store.threadBackTitle) (Esc)")
                         .onGeometryChange(for: Bool.self) { geometry in
                             (geometry.bounds(of: .scrollView)?.minY ?? 0) <= 0
                         } action: { backInView = $0 }
@@ -129,8 +131,9 @@ struct ThreadBackInViewKey: PreferenceKey {
 extension AppStore {
     /// Where Back from the open thread goes: the Power Through stack, or the mailbox under the thread.
     var threadBackTitle: String {
-        if poweringThrough { return "Power Through" }
-        return navigation == .imbox ? "Back" : navigation.title
+        if poweringThrough { return "Back to Power Through" }
+        if !searchQuery.isEmpty { return "Back to search results" }
+        return "Back to \(navigation.title)"
     }
 }
 
@@ -215,6 +218,159 @@ extension MailMessage {
     }
 }
 
+/// Shared by the shell and both mail readers, so dismissing sender details never navigates away.
+@MainActor @Observable
+final class MailSenderPresentation {
+    var messageID: String?
+    /// Kept outside the popover so closing and reopening it cannot submit the same change twice.
+    var busySenders: Set<String> = []
+
+    @discardableResult
+    func dismiss() -> Bool {
+        guard messageID != nil else { return false }
+        messageID = nil
+        return true
+    }
+}
+
+struct MailSenderButton: View {
+    @Environment(MailSenderPresentation.self) private var presentation
+    var message: MailMessage
+    var avatarSize: CGFloat = 38
+
+    private var isPresented: Binding<Bool> {
+        Binding {
+            presentation.messageID == message.id
+        } set: { presented in
+            if presented { presentation.messageID = message.id }
+            else if presentation.messageID == message.id { presentation.dismiss() }
+        }
+    }
+
+    var body: some View {
+        Button { isPresented.wrappedValue.toggle() } label: {
+            HStack(spacing: 12) {
+                Avatar(name: message.from.displayName, key: message.from.email, size: avatarSize)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(message.from.displayName).font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.text).lineLimit(1)
+                    if !message.from.name.isEmpty {
+                        Text(message.from.email).font(.system(size: 12.5)).foregroundStyle(Theme.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.secondary)
+            }.contentShape(Rectangle())
+        }
+        .buttonStyle(QuietButtonStyle())
+        .help("Sender details for \(message.from.formatted)")
+        .accessibilityLabel("Sender details for \(message.from.formatted)")
+        .accessibilityIdentifier("mail-sender-\(message.id)")
+        .popover(isPresented: isPresented, arrowEdge: .bottom) {
+            MailSenderPopover(message: message)
+        }
+        .onDisappear {
+            if presentation.messageID == message.id { presentation.dismiss() }
+        }
+    }
+}
+
+private struct MailSenderPopover: View {
+    @Environment(AppStore.self) private var store
+    @Environment(MailSenderPresentation.self) private var presentation
+    var message: MailMessage
+    @State private var failure: String?
+    @State private var copied = false
+    @FocusState private var closeFocused: Bool
+
+    private var senderKey: String { message.accountID + ":" + message.from.email.lowercased() }
+    private var isDeciding: Bool { presentation.busySenders.contains(senderKey) }
+    private var isOwnAddress: Bool { store.isOwnAddress(message.from.email) }
+    private var isBlocked: Bool { store.decision(for: message.from.email) == .blocked }
+    private var status: String {
+        if isOwnAddress { return "Your address" }
+        switch store.decision(for: message.from.email) {
+        case .approved: return "Approved"
+        case .blocked: return "Screened out"
+        case nil: return "Not screened yet"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Avatar(name: message.from.displayName, key: message.from.email, size: 36)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(message.from.displayName).font(.system(size: 16, weight: .semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(status).font(.caption).foregroundStyle(Theme.secondary)
+                }
+                Spacer(minLength: 4)
+                Button(action: dismiss) { Image(systemName: "xmark").font(.system(size: 12, weight: .semibold)).padding(4) }
+                    .buttonStyle(QuietButtonStyle()).foregroundStyle(Theme.secondary)
+                    .focusable()
+                    .focused($closeFocused)
+                    .keyboardShortcut(.cancelAction).help("Close sender details (Esc)")
+                    .accessibilityLabel("Close sender details")
+            }
+            Text(message.from.email).font(.system(size: 13)).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(message.from.email, forType: .string)
+                copied = true
+            } label: {
+                Label(copied ? "Address copied" : "Copy address", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 13)).padding(.vertical, 3)
+            }.buttonStyle(QuietButtonStyle()).foregroundStyle(Theme.secondary)
+
+            if !isOwnAddress && !message.from.email.isEmpty {
+                Divider()
+                Text(isBlocked
+                     ? "Approving lets mail from this address into your Imbox, including in Gmail."
+                     : "Existing conversations move to Screened Out. Future mail from this address skips your Imbox, including in Gmail.")
+                    .font(.system(size: 12.5)).foregroundStyle(Theme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button { decide(isBlocked ? .approved : .blocked) } label: {
+                    HStack(spacing: 8) {
+                        if isDeciding { ProgressView().controlSize(.small).tint(.white) }
+                        Label(isBlocked ? "Approve sender" : "Screen out this sender",
+                              systemImage: isBlocked ? "hand.thumbsup" : "hand.raised")
+                        Spacer(minLength: 0)
+                    }
+                }
+                .buttonStyle(PillButtonStyle(fill: isBlocked ? Theme.yes : Theme.no))
+                .disabled(isDeciding || store.isApplyingBatch || store.account?.id != message.accountID)
+                .accessibilityIdentifier("sender-screening-action")
+            }
+            if let failure {
+                Text(failure).font(.caption).foregroundStyle(Theme.no).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16).frame(width: 340).foregroundStyle(Theme.text)
+        .onAppear { closeFocused = true }
+        .onKeyPress(.escape) { dismiss(); return .handled }
+    }
+
+    private func dismiss() {
+        // A completed request for another message must not close the sender currently being inspected.
+        if presentation.messageID == message.id { presentation.dismiss() }
+    }
+
+    private func decide(_ decision: ScreeningDecision) {
+        guard store.account?.id == message.accountID, !isOwnAddress, !store.isApplyingBatch,
+              presentation.busySenders.insert(senderKey).inserted else { return }
+        failure = nil
+        Task {
+            defer { presentation.busySenders.remove(senderKey) }
+            let succeeded = await store.decideSender(key: message.from.email, decision: decision)
+            guard store.account?.id == message.accountID else { return }
+            if succeeded { dismiss() }
+            else { failure = store.errorMessage ?? "Couldn’t update this sender. Try again." }
+        }
+    }
+}
+
 struct MailMessageCard: View {
     @Environment(AppStore.self) private var store
     var message: MailMessage
@@ -233,24 +389,28 @@ struct MailMessageCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Button { expanded.toggle() } label: {
-                HStack(alignment: .top, spacing: 12) {
-                    Avatar(name: message.from.displayName, key: message.from.email, size: 38)
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 5) {
-                            Text(message.from.displayName).font(.system(size: 15, weight: .semibold))
-                            if expanded { Text("<\(message.from.email)>").font(.system(size: 13)).foregroundStyle(Theme.secondary) }
-                        }
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    MailSenderButton(message: message)
+                    Group {
                         if expanded {
                             Text("to \(message.to.map(\.formatted).joined(separator: ", "))").font(.system(size: 13)).foregroundStyle(Theme.secondary)
                             if !message.cc.isEmpty { Text("cc \(message.cc.map(\.formatted).joined(separator: ", "))").font(.system(size: 13)).foregroundStyle(Theme.secondary) }
                         } else { Text(message.snippet).font(.system(size: 13)).foregroundStyle(Theme.secondary).lineLimit(1) }
-                    }
-                    Spacer()
+                    }.padding(.leading, 50)
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 10) {
                     Text(Theme.shortDate(message.date)).font(.system(size: 13)).foregroundStyle(Theme.secondary)
                         .help(message.date.formatted(date: .complete, time: .shortened))
-                }.contentShape(Rectangle())
-            }.buttonStyle(.plain)
+                    Button { expanded.toggle() } label: {
+                        Label(expanded ? "Collapse message" : "Expand message", systemImage: expanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(QuietButtonStyle()).foregroundStyle(Theme.secondary).fixedSize()
+                    .accessibilityIdentifier("toggle-message-\(message.id)")
+                }
+            }
 
             if expanded {
                 if let html = resolvedHTML, !html.isEmpty {

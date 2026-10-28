@@ -34,12 +34,8 @@ struct EmailCalendarApp: App {
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Show Week Overlay") { overlay.toggle() }
-                Button("Refresh") { Task { await store.refresh() } }
+                Button("Refresh") { Task { await store.refreshNow() } }
                     .keyboardShortcut("r", modifiers: .command)
-                if store.isDemoMode {
-                    Button("Simulate Incoming Email") { Task { await store.simulateIncomingMail() } }
-                        .keyboardShortcut("m", modifiers: [.command, .shift])
-                }
             }
         }
 
@@ -53,9 +49,6 @@ struct EmailCalendarApp: App {
                         store.alarms.cancel(alarm.id)
                     }
                 }
-            }
-            if store.isDemoMode {
-                Button("Simulate Incoming Email") { Task { await store.simulateIncomingMail() } }
             }
             Divider()
             SettingsLink { Text("Preferences…") }

@@ -5,6 +5,7 @@ import SwiftUI
 /// Mail is a list page, the Power Through stack, or one thread as a full page. Sheets and keys for all live here.
 struct MailRootView: View {
     @Environment(AppStore.self) private var store
+    @Environment(MailSenderPresentation.self) private var senderPresentation
     var searchFocus: () -> Void
     private var composition: MailComposition? {
         get { store.composition }
@@ -103,6 +104,7 @@ struct MailRootView: View {
             }
         }
         .background(MailKeyboardMonitor(enabled: composition == nil && bubbleRequest == nil && !showsScreenedSenders && !showsPalette && !loadingComposition,
+                                        capturesEscape: senderPresentation.messageID != nil,
                                         handle: handleKey).frame(width: 0, height: 0))
         .sheet(item: $bubbleRequest) { request in
             BubbleUpPicker { date in
@@ -135,7 +137,9 @@ struct MailRootView: View {
             let remaining = store.selection.intersection(ids)
             if remaining != store.selection { store.selection = remaining }
         }
-        .onChange(of: store.openThreadID) { showsMore = false }
+        .onChange(of: store.openThreadID) { showsMore = false; senderPresentation.dismiss() }
+        .onChange(of: store.navigation) { senderPresentation.dismiss() }
+        .onChange(of: store.account?.id) { senderPresentation.dismiss() }
         .onChange(of: powerThreads.map(\.id)) { old, new in
             // The card in view went away: keys go to the one that took its place, not to the top card.
             guard let id = powerFocusID, !new.contains(id), let index = old.firstIndex(of: id), !new.isEmpty else { return }
@@ -222,6 +226,10 @@ struct MailRootView: View {
 
     private func handleKey(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if senderPresentation.messageID != nil {
+            if event.keyCode == 53 && modifiers.isEmpty { senderPresentation.dismiss(); return true }
+            return false
+        }
         let character = event.charactersIgnoringModifiers?.lowercased() ?? ""
         if modifiers == .command && character == "k" { showsPalette = true; return true }
         if modifiers == .command && character == "z", store.undoMessage != nil { Task { await store.undo() }; return true }
@@ -290,7 +298,7 @@ struct MailRootView: View {
             MailPaletteCommand(title: "Write a new email", symbol: "square.and.pencil", shortcut: "c") { composition = .newMessage },
             MailPaletteCommand(title: "Search mail", symbol: "magnifyingglass", shortcut: "/") { searchFocus() },
             MailPaletteCommand(title: "Power through new mail", symbol: "bolt", shortcut: "p") { store.navigation = .imbox; store.powerThroughNew() },
-            MailPaletteCommand(title: "Refresh mail and calendar", symbol: "arrow.clockwise", shortcut: "⌘R") { Task { await store.refresh() } },
+            MailPaletteCommand(title: "Refresh mail and calendar", symbol: "arrow.clockwise", shortcut: "⌘R") { Task { await store.refreshNow() } },
             MailPaletteCommand(title: "Show the next seven days", symbol: "calendar", shortcut: "←") { store.drawerPosition = 1 },
             MailPaletteCommand(title: "Show to-dos", symbol: "checklist", shortcut: "→") { store.drawerPosition = -1 },
             MailPaletteCommand(title: "Add a to-do", symbol: "plus", shortcut: "+") { store.focusTodoField() },

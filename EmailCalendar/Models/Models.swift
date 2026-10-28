@@ -116,16 +116,46 @@ public struct MailThread: Codable, Sendable, Identifiable, Equatable {
     public var historyID: String?
     public var bubbleUpAt: Date?
     public var bubbledAt: Date?
+    /// When this conversation most recently became read; nil for mail seen before tracking began.
+    public var seenAt: Date?
+    /// The read history already accounted for, so Gmail's echo of a local action cannot bump it again.
+    public var seenHistoryID: String?
     public init(id: String, accountID: String, messages: [MailMessage] = [], labels: Set<String> = [],
-                historyID: String? = nil, bubbleUpAt: Date? = nil, bubbledAt: Date? = nil) {
+                historyID: String? = nil, bubbleUpAt: Date? = nil, bubbledAt: Date? = nil,
+                seenAt: Date? = nil, seenHistoryID: String? = nil) {
         self.id = id; self.accountID = accountID; self.messages = messages; self.labels = labels
         self.historyID = historyID; self.bubbleUpAt = bubbleUpAt; self.bubbledAt = bubbledAt
+        self.seenAt = seenAt; self.seenHistoryID = seenHistoryID
     }
     public var latestMessage: MailMessage? { messages.max { $0.date < $1.date } }
     public var subject: String { latestMessage?.subject.isEmpty == false ? latestMessage!.subject : "(No subject)" }
     public var snippet: String { latestMessage?.snippet ?? "" }
     public var updatedAt: Date { latestMessage?.date ?? .distantPast }
     public var unread: Bool { messages.contains { $0.unread } }
+    /// The same order for rows, keyboard navigation and range selection, including the open unread row.
+    static func imboxPrecedes(_ lhs: MailThread, _ rhs: MailThread, openedUnreadID: String? = nil) -> Bool {
+        let lhsNew = lhs.unread || lhs.id == openedUnreadID
+        let rhsNew = rhs.unread || rhs.id == openedUnreadID
+        if lhsNew != rhsNew { return lhsNew }
+        // Surfaced reminders always take priority within their section, newest return first.
+        if let lhsBubble = lhs.bubbledAt, let rhsBubble = rhs.bubbledAt {
+            if lhsBubble != rhsBubble { return lhsBubble > rhsBubble }
+        } else if (lhs.bubbledAt != nil) != (rhs.bubbledAt != nil) {
+            return lhs.bubbledAt != nil
+        }
+        if lhsNew {
+            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+        } else {
+            // Known seen times come before legacy mail, even if a legacy message has a future date.
+            if let lhsSeen = lhs.seenAt, let rhsSeen = rhs.seenAt {
+                if lhsSeen != rhsSeen { return lhsSeen > rhsSeen }
+            } else if (lhs.seenAt != nil) != (rhs.seenAt != nil) {
+                return lhs.seenAt != nil
+            }
+            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+        }
+        return lhs.id < rhs.id
+    }
     public var sender: MailAddress {
         messages.filter { !$0.labels.contains("SENT") && !$0.labels.contains("DRAFT") && $0.from.email.lowercased() != accountID.lowercased() }
             .max { $0.date < $1.date }?.from ?? latestMessage?.from ?? MailAddress(email: "")

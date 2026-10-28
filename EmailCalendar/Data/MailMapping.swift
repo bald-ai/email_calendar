@@ -131,7 +131,7 @@ enum MailMapping {
                            bodyIsExternal: parts.contains { ["text/plain", "text/html"].contains($0.mimeType ?? "") && ($0.filename ?? "").isEmpty && $0.body?.data == nil && $0.body?.attachmentId != nil })
     }
 
-    static func thread(_ source: GoogleMailThread, accountID: String, labels: [String: String], drafts: [String: String] = [:], previous: MailThread? = nil, bubble: BubbleRecord? = nil) -> MailThread {
+    static func thread(_ source: GoogleMailThread, accountID: String, labels: [String: String], drafts: [String: String] = [:], previous: MailThread? = nil, bubble: BubbleRecord? = nil, observedAt: Date = .now) -> MailThread {
         var messages = (source.messages ?? []).map { message($0, accountID: accountID, labels: labels, draftID: drafts[$0.id]) }.sorted { $0.date < $1.date }
         for index in messages.indices where messages[index].needsBodyHydration {
             if let hydrated = previous?.messages.first(where: { $0.id == messages[index].id && $0.bodyIsExternal == false }) {
@@ -140,10 +140,17 @@ enum MailMapping {
                 messages[index].bodyIsExternal = false
             }
         }
-        return MailThread(id: source.id, accountID: accountID, messages: messages,
+        var thread = MailThread(id: source.id, accountID: accountID, messages: messages,
                           labels: messages.reduce(into: Set<String>()) { $0.formUnion($1.labels) },
                           historyID: source.historyId, bubbleUpAt: bubble?.surfacedAt == nil ? bubble?.dueAt : nil,
-                          bubbledAt: bubble?.surfacedAt ?? previous?.bubbledAt)
+                          bubbledAt: bubble?.surfacedAt ?? previous?.bubbledAt,
+                          seenAt: previous?.seenAt,
+                          seenHistoryID: previous?.seenHistoryID ?? previous?.historyID ?? source.historyId)
+        if previous?.unread == true && !thread.unread {
+            thread.seenAt = observedAt
+            thread.seenHistoryID = source.historyId ?? thread.seenHistoryID
+        }
+        return thread
     }
 
     private static func plainBody(_ plain: String, html: String) -> String {

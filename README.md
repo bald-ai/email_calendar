@@ -1,6 +1,6 @@
 # Email + Calendar
 
-> **Status: in progress.** A personal project I use daily. Demo mode runs without a Google account.
+> **Status: in progress.** A personal project I use daily. A Google account is required for mail and calendars.
 
 A native macOS 15+ app written in Swift 6, SwiftUI and AppKit. Mail is backed by Gmail, calendars by Google Calendar, and the local cache by SQLite. The week overlay opens from cached data with **⌘F3**: tap to toggle, hold to peek. It scrolls smoothly through days, and switches between a week timeline and a month view.
 
@@ -8,26 +8,17 @@ A native macOS 15+ app written in Swift 6, SwiftUI and AppKit. Mail is backed by
 
 - **AI event extraction:** paste a screenshot or a sentence, and the app proposes calendar events with warnings for anything doubtful. Time-zone and weekday checks are done in code, not by the model. [Details and benchmark ↓](#ai-event-extraction-and-benchmark)
 - **46-case tiered benchmark** for that feature: simple → context → traps → app controls, run against several models for accuracy, latency and cost.
-- **Demo mode:** the real mail and calendar code runs against a fake Gmail and Google Calendar, so you can try everything without signing in.
 
-## Run on your Mac (demo data, no Google account)
+## Run on your Mac
 
-1. Install **Xcode 16 or later** and open `EmailCalendar.xcodeproj`.
-2. Select the **EmailCalendar** scheme and run. With no Google client ID configured, the app starts in **demo mode**.
-
-Demo mode runs the real mail and calendar code against a fake Gmail and Google Calendar inside the app (`EmailCalendar/Google/MockGoogle`). It comes with a seeded mailbox, four calendars with recurring events, invitations, and an event about 35 minutes after first launch, so the overlay's "Next" line has something to show. Everything works: Screener and its filters, Set Aside, Bubble Up, drafts, sending, search, and creating, editing and RSVPing events. Changes are saved to `~/Library/Containers/ai.bald.EmailCalendar/Data/Library/Application Support/EmailCalendar/Mock/`.
-
-- A few unknown senders arrive after the first sync, so the Screener has something in it.
-- **File → Simulate Incoming Email** (⇧⌘M), the menu bar icon, or Preferences delivers another email. Screened-out senders' new mail is caught by their filter.
-- **Preferences → Reset demo data** starts over with fresh data, dated relative to today.
-- Force a mode with the `EC_MOCK=1` or `EC_MOCK=0` environment variable in the scheme.
-
-## Connect your Google account (later)
+Install **Xcode 16 or later** and open `EmailCalendar.xcodeproj`. Configure Google access before running:
 
 1. Create a Google Cloud project, enable the **Gmail API** and **Google Calendar API**, and configure an external OAuth consent screen in **Testing**. Add your own Google address as a test user.
 2. Create an OAuth client with application type **Desktop app**. Copy `Config/Secrets.example.xcconfig` to `Config/Secrets.xcconfig`, and fill in its client ID and client secret. The app uses an ephemeral localhost redirect with PKCE; do not create a Web application client.
-3. Choose your signing team in **Signing & Capabilities**, or, without a team, set `CODE_SIGN_STYLE = Manual` and a local code-signing certificate as `CODE_SIGN_IDENTITY` in `Secrets.xcconfig` (an ad-hoc signed build changes with every rebuild, so the Keychain asks for access again each time). Then run. Xcode resolves the sole package dependency, [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts).
+3. Choose your signing team in **Signing & Capabilities**, or, without a team, set `CODE_SIGN_STYLE = Manual` and a local code-signing certificate as `CODE_SIGN_IDENTITY` in `Secrets.xcconfig` (an ad-hoc signed build changes with every rebuild, so the Keychain asks for access again each time). Select the **EmailCalendar** scheme and run. Xcode resolves the sole package dependency, [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts).
 4. Sign in from the welcome screen. The first mail sync scans all sent-message recipients to seed your approved senders, so a large account can take a while. Calendar sync runs independently. Subsequent syncs use Gmail history and Calendar sync tokens.
+
+Without a configured Google client ID, the app stays at the welcome screen and shows configuration guidance. Existing Google sessions are restored on subsequent launches.
 
 The requested scopes are `gmail.modify`, `gmail.settings.basic`, and `calendar`. Tokens are saved in Keychain. OAuth credentials are build settings from the ignored `Secrets.xcconfig`; they are never stored in the mail database.
 
@@ -38,6 +29,7 @@ For normal use, build a signed app, move it to `/Applications`, and launch it th
 ## Included
 
 - Mail in one centered column with no sidebar: Imbox (new for you / previously seen), Screener, Set Aside (also as a pile at the bottom of the Imbox), Bubble Up, Drafts, Sent, Screened Out, Spam, Everything and Calendar, reached from the menu under the logo.
+- Previously Seen puts bubbled-up conversations first, newest return first, then sorts the rest by when each conversation most recently became read. Opening unread mail, Seen, and marking it read record that time; reopening read mail leaves it in place. Reads in other apps use the time this app detects them during sync. Mail already read before tracking began stays below tracked mail, ordered by message date, unless it bubbles up. Seen times are stored per account on this Mac.
 - Threads open as full pages with a floating action bar: Reply Now, Set Aside, Bubble Up, To-do, Archive, More.
 - **Days and To-do drawers** beside mail, Ulysses-style: the next seven days on the left, to-dos on the right, one at a time. Slide them with a two-finger swipe, `←` / `→`, the toggles in the top bar, or by clicking a folded drawer's spine. Days is an agenda with a now-line; click an event to see its linked email, open it, or join its call. To-dos are local to this Mac (per account): add, rename (double-click), notes, done, and a folded Completed list.
 - **Link email to events and to-dos**: drag a mail row (or an open thread's subject) onto an event, a to-do, or the add field (which makes a new to-do from it). Hovering a dragged email over a folded drawer's spine opens it. Or press `l` and click an event or to-do. Linked threads show a link mark in the list and chips under the subject; events show a mail count; to-dos show the sender. **To-do** (`t`) makes a linked to-do and takes the email out of the Imbox; undo reverses both. Links and to-dos are stored locally with the mail cache.
@@ -47,7 +39,7 @@ For normal use, build a signed app, move it to `/Applications`, and launch it th
 - **Spam**: Gmail's Spam folder with an unread count in the menu. Move to Spam, Not spam (back to the Imbox, approving the sender if it had no decision yet) and Trash, all undoable and mirrored in Gmail. Searching from Spam searches only Spam. A conversation is hidden from other mailboxes only when every message in it is spam.
 - **Select several emails**: ⌘-click, ⇧-click for a range, hover a row and click the circle beside the avatar, or press `x` / `⇧J` / `⇧K` / `⌘A`. While anything is selected a bar at the bottom offers Archive, Set Aside, Bubble Up, Mark read or unread, Spam and Trash for all of them (also in the right-click menu, the command palette and the usual keys `e`, `a`, `z`), and a plain click picks rows instead of opening them. One Undo reverses the whole batch; if a few fail, the rest still go through and the app says how many didn't. In the Screener the same selection gives Yes or No for several senders at once.
 - Sender and domain decisions, all-mail moves, Google rejection filters, and five-second undo that restores each message’s previous labels. Remote-image permission is separate from sender approval.
-- Durable Bubble Up times processed on launch and refresh; Gmail labels expose mail states on other devices. Due mail returns at the top when it surfaces, then sorts alongside newer mail.
+- Durable Bubble Up times processed on launch and refresh; Gmail labels expose mail states on other devices. Bubbled-up mail takes priority within its Imbox section, newest return first, including already-read mail in Previously Seen.
 - Calendar visibility, Day/Week/Month views, expanded recurring events, event creation/editing/deletion, this-event/all-events scope, invitation responses and detected video links.
 - A nonactivating, full-width `NSPanel` over Spaces/full-screen apps, selected by mouse display, with tap/hold hotkey, Escape/outside-click/Space dismissal, Reduce Motion, resizing, now-line, live next-event anchor, week navigation and quick event creation.
 - **Quick alarms** in the overlay (`A`): one-click 5m–1h presets, or type `10m`, `1h30`, `14:30`, `7pm`, with an optional label. Clicking an empty slot also offers **Alarm** at that time. A due alarm takes over every screen with a flashing red window and a looping beep until you **Snooze** (5 minutes; `S` or Space) or **Stop** (Return or Escape). Alarms survive relaunches; a missed one rings as soon as the app runs again. While an alarm is less than four hours away the Mac doesn't idle-sleep (closing the lid still sleeps it, and the sound follows the system volume). Pending alarms show in the overlay header and the menu bar, where they can be cancelled.
@@ -64,7 +56,7 @@ The app polls while open and refreshes on focus and wake. Cached mail and events
 | --- | --- |
 | `h` | Open the go-to menu; then `1`–`6` for Imbox, Calendar, Screener, Set Aside, Bubble Up, Drafts |
 | `j` / `k`, Return | Move through emails, open one (in a thread, `j`/`k` go to the next or previous) |
-| `p` | Power Through New: all new mail as one scrolling stack of cards; `j`/`k` jump between cards, `s` marks the one in view seen, Return opens its whole thread |
+| `p` | Power Through New: all new mail as one scrolling stack of cards, each ending in Reply, Set Aside, Bubble Up, Archive and Seen; long emails stop at Show full email; `j`/`k` jump between cards, `s` marks the one in view seen, Return opens its whole thread |
 | `r`, `f`, `c` | Reply, forward, write a new email (reply all is under More) |
 | `a` (or `s`) | Set Aside, or take it back |
 | `z` (or `b`) | Bubble Up |
@@ -128,17 +120,16 @@ python3 scripts/summarize_event_benchmark.py results
 
 The Xcode project is checked in. After adding Swift source files, regenerate it with `python3 scripts/generate_project.py`.
 
-Validated on macOS with Xcode: the app compiles and **all tests pass**, covering SQLite isolation/rollback, OAuth-token retry, MIME/attachments, history and sync-token recovery, sender/filter undo, account-switch cancellation, Bubble Up, drafts/sending, recurrence, invitations and confirmed-write recovery. All 29 app source files passed parsing for the macOS 15 target, and the project references, scheme and resource plists parsed successfully. Native SDK compilation is covered by the added macOS CI workflow but has not run here.
+Validated on macOS with Xcode on 28 October 2026: the automated suite passes, and both Debug and signed universal Release builds compile. Regression coverage includes SQLite isolation/rollback, OAuth-token retry, MIME/attachments, history and sync-token recovery, sender/filter undo, account-switch cancellation, Bubble Up, drafts/sending, recurrence, invitations and confirmed-write recovery. The latest run also covers preserving another composer's recovery checkpoint when saving a parked draft, closing a discarded draft after a failed follow-up refresh, and zero-minute reminders at midnight.
+
+Native app checks covered long/short HTML rendering, expansion and collapse, Power Through navigation and selection, sender details, manual refresh, draft autosave, Undo Send, and pending-send previews. Live Gmail-to-HEY delivery preserved Czech text and a Unicode attachment filename; the received 4 MiB attachment matched the original SHA-256. Google Calendar timed/all-day edits and the midnight reminder were checked against the connected account. Temporary calendar data and sender-screening changes were cleaned up. Mouse-wheel automation was unavailable; HTML scrolling was exercised through accessibility scroll actions and native layout measurements.
 
 Before treating this as a finished release, verify on your Mac:
 
 - Real OAuth sign-in, token restore after relaunch, and Keychain behavior in a signed build.
 - Overlay first-frame latency under 150 ms, over a full-screen app, on multiple displays and Spaces; focus restoration for both taps and peeks.
 - Screen an address/domain out and confirm the filter in Gmail on your phone; undo removes it and restores prior labels.
-- Compose, Gmail draft continuation, attachment upload/download and reply threading with real mail.
 - Calendar recurrence and invitation writes in your own calendars, time-zone/DST transitions, sleep/wake Bubble Up, and notification/login permissions.
-
-The development environment for this implementation is Linux. Core Swift compilation, mock integration tests and macOS source syntax can be checked here; native SDK typechecking, UI execution, real account access and overlay timing require Xcode/macOS.
 
 ## Source map
 

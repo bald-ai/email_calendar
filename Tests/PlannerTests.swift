@@ -64,15 +64,6 @@ struct PlannerTests {
         #expect(snapshot.doneTodos.map(\.title) == ["Done late", "Done early"])
     }
 
-    @Test func seededFlagSticks() async throws {
-        let (service, directory) = try makeService()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        #expect(try await service.isSeeded(accountID: "alex") == false)
-        try await service.markSeeded(accountID: "alex")
-        #expect(try await service.isSeeded(accountID: "alex"))
-        #expect(try await service.isSeeded(accountID: "bob") == false)
-    }
-
     @Test func agendaGroupsSevenDaysWithAllDayFirstAndSkipsCancelled() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Europe/Prague")!

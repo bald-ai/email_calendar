@@ -5,13 +5,13 @@ import FoundationNetworking
 #endif
 @testable import EmailCalendarCore
 
-/// Runs the real mail and calendar services end to end against the in-app mock backend.
+/// Runs the real mail and calendar services end to end against the test-only mock backend.
 final class MockBackendTests: XCTestCase, @unchecked Sendable {
     func testDiscardRemovesTheDraftButKeepsTheConversation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let backend = MockGoogleBackend(fileURL: directory.appendingPathComponent("google.json"))
-        let api = GoogleAPI(auth: MockTokenProvider(), session: MockGoogleURLProtocol.session(backend: backend))
+        let api = GoogleAPI(auth: MockTokenProvider(), session: MockGoogleBackendURLProtocol.session(backend: backend))
         let mail = MailService(api: api, store: try LocalStore(url: directory.appendingPathComponent("cache.sqlite")))
         let account = Account(id: MockGoogleBackend.accountEmail, email: MockGoogleBackend.accountEmail)
         _ = try await mail.sync(account: account)
@@ -38,11 +38,11 @@ final class MockBackendTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(snapshot.threads.contains { $0.subject == "Second thoughts" })
     }
 
-    func testDemoMailboxAndCalendarWorkEndToEnd() async throws {
+    func testMailboxAndCalendarWorkEndToEnd() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let backend = MockGoogleBackend(fileURL: directory.appendingPathComponent("google.json"))
-        let api = GoogleAPI(auth: MockTokenProvider(), session: MockGoogleURLProtocol.session(backend: backend))
+        let api = GoogleAPI(auth: MockTokenProvider(), session: MockGoogleBackendURLProtocol.session(backend: backend))
         let store = try LocalStore(url: directory.appendingPathComponent("cache.sqlite"))
         let mail = MailService(api: api, store: store)
         let calendar = CalendarService(api: api, store: store)
@@ -125,7 +125,7 @@ final class MockBackendTests: XCTestCase, @unchecked Sendable {
 
         // State persists: a new backend instance reads the same mailbox from disk.
         let reopened = MockGoogleBackend(fileURL: directory.appendingPathComponent("google.json"))
-        let reopenedAPI = GoogleAPI(auth: MockTokenProvider(), session: MockGoogleURLProtocol.session(backend: reopened))
+        let reopenedAPI = GoogleAPI(auth: MockTokenProvider(), session: MockGoogleBackendURLProtocol.session(backend: reopened))
         let filters = try await reopenedAPI.filters()
         XCTAssertEqual(filters.map(\.criteria.from), ["promo@dealsweekly.example"])
     }

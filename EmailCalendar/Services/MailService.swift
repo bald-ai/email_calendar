@@ -155,7 +155,7 @@ actor MailService {
     private var undoActions: [UUID: UndoAction] = [:]
 
     private struct MessageState: Sendable { var id: String; var labels: Set<String> }
-    private struct ThreadState: Sendable { var id: String; var messages: [MessageState]; var bubble: BubbleRecord? }
+    private struct ThreadState: Sendable { var id: String; var messages: [MessageState]; var bubble: BubbleRecord?; var seenAt: Date? }
     private struct UndoAction: Sendable {
         var token: MailUndoToken
         var accountID: String
@@ -247,8 +247,8 @@ actor MailService {
     func trash(threadID: String, account: Account) async throws -> MailUndoToken {
         try await serialized(accountID: account.id) { try await self.trashImpl(threadID: threadID, account: account) }
     }
-    func markUnread(threadID: String, unread: Bool, account: Account) async throws -> MailUndoToken {
-        try await serialized(accountID: account.id) { try await self.markUnreadImpl(threadID: threadID, unread: unread, account: account) }
+    func markUnread(threadID: String, unread: Bool, seenAt: Date = .now, account: Account) async throws -> MailUndoToken {
+        try await serialized(accountID: account.id) { try await self.markUnreadImpl(threadID: threadID, unread: unread, seenAt: seenAt, account: account) }
     }
     func toggleSetAside(threadID: String, account: Account) async throws -> MailUndoToken {
         try await serialized(accountID: account.id) { try await self.toggleSetAsideImpl(threadID: threadID, account: account) }
@@ -445,14 +445,20 @@ actor MailService {
 
     private func incrementalSync(account: Account, cursor: String) async throws {
         var pageToken: String?, ids = Set<String>(), nextCursor = cursor
+        var readHistoryIDs: [String: String] = [:]
         repeat {
             try Task.checkCancellation()
             let page = try await api.history(startHistoryID: cursor, pageToken: pageToken)
-            for history in page.history ?? [] { ids.formUnion(history.changedThreadIDs) }
+            for history in page.history ?? [] {
+                ids.formUnion(history.changedThreadIDs)
+                for change in history.labelsRemoved ?? [] where change.labelIds.contains("UNREAD") {
+                    readHistoryIDs[change.message.threadId] = history.id
+                }
+            }
             nextCursor = page.historyId
             pageToken = page.nextPageToken
         } while pageToken != nil
-        _ = try await cacheSources(Array(ids), account: account, isSync: true)
+        _ = try await cacheSources(Array(ids), account: account, isSync: true, readHistoryIDs: readHistoryIDs)
         try await store.setMetadata(nextCursor, key: "mailHistoryID", accountID: account.id)
     }
 
@@ -623,8 +629,33 @@ actor MailService {
         return register(message: "Moved to Trash", threads: [state], accountID: account.id)
     }
 
-    private func markUnreadImpl(threadID: String, unread: Bool, account: Account) async throws -> MailUndoToken {
-        try await move(threadID: threadID, adding: unread ? ["UNREAD"] : [], removing: unread ? [] : ["UNREAD"], message: unread ? "Marked unread" : "Marked read", account: account)
+    private func markUnreadImpl(threadID: String, unread: Bool, seenAt: Date = .now, account: Account) async throws -> MailUndoToken {
+        try await prepare(account: account)
+        let state = try await capture(threadID: threadID, account: account)
+        let changed = try await api.modifyThread(id: threadID, addLabelIDs: unread ? ["UNREAD"] : [],
+                                                 removeLabelIDs: unread ? [] : ["UNREAD"])
+        // Persist the confirmed write before refreshing. A failed follow-up GET must not lose its seen time.
+        if var thread = try await store.load(MailThread.self, id: threadID, collection: "threads", accountID: account.id) {
+            if thread.unread && !unread { thread.seenAt = seenAt }
+            for index in thread.messages.indices {
+                if unread { thread.messages[index].labels.insert("UNREAD") }
+                else { thread.messages[index].labels.remove("UNREAD") }
+            }
+            if unread { thread.labels.insert("UNREAD") }
+            else { thread.labels.remove("UNREAD") }
+            thread.historyID = changed.historyId ?? thread.historyID
+            if !unread { thread.seenHistoryID = changed.historyId ?? thread.seenHistoryID }
+            try await save(thread)
+        }
+        var warning: String?
+        do {
+            var thread = try await refresh(threadID: threadID, accountID: account.id)
+            if !unread {
+                thread.seenHistoryID = thread.historyID ?? thread.seenHistoryID
+                try await save(thread)
+            }
+        } catch { warning = "Read status changed. The mail view could not refresh: " + error.localizedDescription }
+        return register(message: unread ? "Marked unread" : "Marked read", threads: [state], accountID: account.id, warning: warning)
     }
 
     /// Toggles, or with a target moves the thread there (a thread already there is left alone).
@@ -759,13 +790,14 @@ actor MailService {
     }
 
     private func changeImpl(_ change: MailThreadChange, threadIDs: [String], account: Account) async throws -> MailUndoToken {
-        try await batch(threadIDs, message: change.message(count:), account: account) { id in
+        let seenAt = Date.now
+        return try await batch(threadIDs, message: change.message(count:), account: account) { id in
             switch change {
             case .archive: try await self.archiveImpl(threadID: id, account: account)
             case .trash: try await self.trashImpl(threadID: id, account: account)
             case .spam: try await self.moveToSpamImpl(threadID: id, account: account)
             case .notSpam: try await self.notSpamImpl(threadID: id, account: account)
-            case .read(let read): try await self.markUnreadImpl(threadID: id, unread: !read, account: account)
+            case .read(let read): try await self.markUnreadImpl(threadID: id, unread: !read, seenAt: seenAt, account: account)
             case .setAside(let aside): try await self.toggleSetAsideImpl(threadID: id, to: aside, account: account)
             case .bubbleUp(let date): try await self.bubbleUpImpl(threadID: id, date: date, account: account)
             }
@@ -853,13 +885,25 @@ actor MailService {
         do { try await api.deleteDraft(id: draftID) }
         catch let error as GoogleAPIError where error.statusCode == 404 { /* Already gone. */ }
         draftMaps[account.id] = draftMaps[account.id]?.filter { $0.value != draftID }
-        try await store.setMetadata(draftMaps[account.id] ?? [:], key: "draftIDs", accountID: account.id)
-        let threads = try await store.all(MailThread.self, collection: "threads", accountID: account.id)
-        guard let thread = threads.first(where: { $0.messages.contains { $0.draftID == draftID } }) else { return }
-        do { _ = try await refresh(threadID: thread.id, accountID: account.id) }
-        catch let error as GoogleAPIError where error.statusCode == 404 {
-            // A new email's thread held only the draft.
-            try await store.remove(id: thread.id, collection: "threads", accountID: account.id)
+        do {
+            try await store.setMetadata(draftMaps[account.id] ?? [:], key: "draftIDs", accountID: account.id)
+            let threads = try await store.all(MailThread.self, collection: "threads", accountID: account.id)
+            guard var thread = threads.first(where: { $0.messages.contains { $0.draftID == draftID } }) else { return }
+            // Apply the confirmed deletion before the optional GET, retaining any received mail.
+            thread.messages.removeAll { $0.draftID == draftID }
+            if thread.messages.isEmpty {
+                try await store.remove(id: thread.id, collection: "threads", accountID: account.id)
+            } else {
+                thread.labels = thread.messages.reduce(into: Set<String>()) { $0.formUnion($1.labels) }
+                try await save(thread)
+            }
+            do { _ = try await refresh(threadID: thread.id, accountID: account.id) }
+            catch let error as GoogleAPIError where error.statusCode == 404 {
+                try await store.remove(id: thread.id, collection: "threads", accountID: account.id)
+            }
+        } catch {
+            // Gmail already deleted it. Close the composer instead of resuming autosaves to a dead draft ID;
+            // the next sync can repair a failed local write or refresh.
         }
     }
 
@@ -1058,7 +1102,8 @@ actor MailService {
     private func capture(threadID: String, account: Account) async throws -> ThreadState {
         let thread = try await refresh(threadID: threadID, accountID: account.id)
         return ThreadState(id: threadID, messages: thread.messages.map { MessageState(id: $0.id, labels: $0.labels) },
-                           bubble: try await store.load(BubbleRecord.self, id: threadID, collection: "bubbles", accountID: account.id))
+                           bubble: try await store.load(BubbleRecord.self, id: threadID, collection: "bubbles", accountID: account.id),
+                           seenAt: thread.seenAt)
     }
 
     private func restoreThread(_ state: ThreadState, account: Account) async throws {
@@ -1075,7 +1120,10 @@ actor MailService {
             }
         }
         try await restoreBubble(state.bubble, threadID: state.id, accountID: account.id)
-        _ = try await refresh(threadID: state.id, accountID: account.id)
+        var restored = try await refresh(threadID: state.id, accountID: account.id)
+        restored.seenAt = state.seenAt
+        restored.seenHistoryID = restored.historyID ?? restored.seenHistoryID
+        try await save(restored)
     }
 
     private func restoreBubble(_ bubble: BubbleRecord?, threadID: String, accountID: String) async throws {
@@ -1141,10 +1189,17 @@ actor MailService {
         return labelMaps[accountID]?.first(where: { $0.value == name })?.key ?? name
     }
 
-    private func mapped(_ source: GoogleMailThread, accountID: String) async throws -> MailThread {
+    private func mapped(_ source: GoogleMailThread, accountID: String, readHistoryID: String? = nil, observedAt: Date = .now) async throws -> MailThread {
         let previous = try await store.load(MailThread.self, id: source.id, collection: "threads", accountID: accountID)
         let bubble = try await store.load(BubbleRecord.self, id: source.id, collection: "bubbles", accountID: accountID)
-        return MailMapping.thread(source, accountID: accountID, labels: labelMaps[accountID] ?? [:], drafts: draftMaps[accountID] ?? [:], previous: previous, bubble: bubble)
+        var thread = MailMapping.thread(source, accountID: accountID, labels: labelMaps[accountID] ?? [:], drafts: draftMaps[accountID] ?? [:], previous: previous, bubble: bubble, observedAt: observedAt)
+        // History also catches unread -> read cycles between polls, even if both cached snapshots are read.
+        if !thread.unread, let readHistoryID,
+           previous == nil || thread.seenHistoryID == nil || readHistoryID.compare(thread.seenHistoryID!, options: .numeric) == .orderedDescending {
+            thread.seenAt = observedAt
+            thread.seenHistoryID = readHistoryID
+        }
+        return thread
     }
 
     @discardableResult
@@ -1216,7 +1271,7 @@ actor MailService {
         return result
     }
 
-    private func cacheSources(_ ids: [String], account: Account, isSync: Bool) async throws -> [MailThread] {
+    private func cacheSources(_ ids: [String], account: Account, isSync: Bool, readHistoryIDs: [String: String] = [:], observedAt: Date = .now) async throws -> [MailThread] {
         var threads: [MailThread] = []
         for offset in stride(from: 0, to: ids.count, by: 8) {
             try Task.checkCancellation()
@@ -1225,7 +1280,7 @@ actor MailService {
                 let sources = try await self.fetchSources(batch)
                 var results: [MailThread] = []
                 for source in sources {
-                    let thread = try await self.mapped(source, accountID: account.id)
+                    let thread = try await self.mapped(source, accountID: account.id, readHistoryID: readHistoryIDs[source.id], observedAt: observedAt)
                     try await self.save(thread, background: isSync)
                     results.append(thread)
                 }

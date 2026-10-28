@@ -8,6 +8,7 @@ struct AppShellView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var showsMenu = false
     @State private var showsAccount = false
+    @State private var senderPresentation = MailSenderPresentation()
     @State private var searching = false
     @State private var searchText = ""
     @FocusState private var searchFocused: Bool
@@ -47,6 +48,7 @@ struct AppShellView: View {
                 PendingSendBar().padding(.bottom, store.navigation == .calendar ? 20 : 140).padding(.horizontal, 24)
             }
         }
+        .environment(senderPresentation)
         .background(MailKeyboardMonitor(enabled: store.isSignedIn, handle: handleShellKey).frame(width: 0, height: 0))
         .onAppear { store.openWindow = { openWindow(id: "main") } }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -72,14 +74,17 @@ struct AppShellView: View {
                         Label(backTitle, systemImage: "chevron.left").labelStyle(.titleAndIcon)
                     }
                     .buttonStyle(PillButtonStyle(fill: Theme.back, foreground: Color(hex: 0x10372B)))
-                    .help("Back (Esc)")
+                    .help("\(backTitle) (Esc)")
                 }
                 if searching {
                     HStack(spacing: 6) {
                         Image(systemName: "magnifyingglass").foregroundStyle(Theme.secondary)
                         TextField("Search mail", text: $searchText).textFieldStyle(.plain).focused($searchFocused).frame(width: 220)
                             .onSubmit { searchFocused = false; Task { await store.search(searchText) } }
-                            .onKeyPress(.escape) { endSearch(); return .handled }
+                            .onKeyPress(.escape) {
+                                if !senderPresentation.dismiss() { endSearch() }
+                                return .handled
+                            }
                     }
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(Theme.raised, in: Capsule())
@@ -89,6 +94,7 @@ struct AppShellView: View {
                     }.buttonStyle(QuietButtonStyle()).help("Search (/)")
                 }
                 Spacer()
+                if store.isSignedIn { refreshStatus }
                 if store.isSignedIn && store.navigation != .calendar { drawerToggles }
                 if store.isSignedIn { accountMenu }
             }
@@ -107,6 +113,20 @@ struct AppShellView: View {
         }
         .padding(.horizontal, 26).frame(height: 54)
         .animation(.easeOut(duration: 0.15), value: threadBackInView)
+        .animation(.easeOut(duration: 0.15), value: store.refreshProgress)
+    }
+
+    /// ⌘R or Refresh running, then "Updated" for a moment. A failure shows the banner instead.
+    @ViewBuilder private var refreshStatus: some View {
+        switch store.refreshProgress {
+        case .running?:
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Refreshing…") }
+                .font(.caption).foregroundStyle(Theme.secondary).transition(.opacity)
+        case .updated?:
+            Label("Updated", systemImage: "checkmark").font(.caption).foregroundStyle(Theme.secondary).transition(.opacity)
+        case nil:
+            EmptyView()
+        }
     }
 
     /// Days and To-do: which drawer is beside mail. Same as ← / → or a two-finger swipe.
@@ -147,12 +167,9 @@ struct AppShellView: View {
         .buttonStyle(.plain).help(store.accountEmail)
         .popover(isPresented: $showsAccount, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(store.isDemoMode ? "Demo · \(store.accountEmail)" : store.accountEmail)
+                Text(store.accountEmail)
                     .font(.caption).foregroundStyle(Theme.secondary).padding(.horizontal, 8).padding(.bottom, 4)
-                accountItem("Refresh", symbol: "arrow.clockwise") { Task { await store.refresh() } }
-                if store.isDemoMode {
-                    accountItem("Simulate incoming email", symbol: "envelope.badge") { Task { await store.simulateIncomingMail() } }
-                }
+                accountItem("Refresh", symbol: "arrow.clockwise") { Task { await store.refreshNow() } }
                 SettingsLink {
                     Label("Preferences…", systemImage: "gearshape").frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
@@ -175,6 +192,7 @@ struct AppShellView: View {
     }
 
     private func goBack() {
+        if senderPresentation.dismiss() { return }
         if store.openThreadID != nil { store.closeThread() }
         else if store.poweringThrough { store.endPowerThrough() }
         else if !store.searchQuery.isEmpty { endSearch() }
@@ -196,7 +214,7 @@ struct AppShellView: View {
             Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.unread)
             Text(message).font(.callout).textSelection(.enabled)
             Spacer()
-            Button("Retry") { Task { await store.refresh() } }.buttonStyle(QuietButtonStyle())
+            Button("Retry") { Task { await store.refreshNow() } }.buttonStyle(QuietButtonStyle())
             Button { store.errorMessage = nil } label: { Image(systemName: "xmark") }.buttonStyle(QuietButtonStyle())
         }
         .padding(12).background(Theme.raised, in: RoundedRectangle(cornerRadius: 12))
@@ -211,6 +229,7 @@ struct AppShellView: View {
     }
 
     private func handleShellKey(_ event: NSEvent) -> Bool {
+        if senderPresentation.messageID != nil { return false }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         guard modifiers.isEmpty else { return false }
         if event.keyCode == 53 {

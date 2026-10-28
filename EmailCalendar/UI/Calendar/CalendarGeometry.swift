@@ -45,9 +45,7 @@ enum CalendarGeometry {
     }
 
     static func overlaps(_ event: CalendarEvent, day: Date) -> Bool {
-        let start = calendar.startOfDay(for: day)
-        let end = calendar.date(byAdding: .day, value: 1, to: start)!
-        return event.start < end && event.end > start
+        CalendarDates.overlaps(event, day: day, calendar: calendar)
     }
 
     static func minutes(_ date: Date, on day: Date) -> Double {

@@ -38,6 +38,8 @@ final class AppStore {
     var selectedEventID: String?
     var searchQuery = ""
     var isRefreshing = false
+    /// ⌘R or a Refresh button: shown in the top bar from the press until its pass ends. Background syncs stay quiet.
+    var refreshProgress: RefreshProgress?
     var isSearching = false
     var searchNextPageToken: String?
     var isSigningIn = false
@@ -62,6 +64,9 @@ final class AppStore {
     var sendAddresses: [String] = []
     /// The banner text a failed refresh showed, cleared by the next successful one.
     @ObservationIgnored private var refreshError: String?
+    /// ⌘R pressed while another refresh runs: that refresh goes around once more when it ends.
+    @ObservationIgnored private var manualRefreshQueued = false
+    @ObservationIgnored private var refreshProgressTask: Task<Void, Never>?
     /// Emails closed while Gmail couldn't be reached. Each refresh tries to save them to Gmail.
     @ObservationIgnored private let parkedDrafts: ParkedDrafts?
     @ObservationIgnored private var sendAddressesCheckedAt: Date?
@@ -96,17 +101,12 @@ final class AppStore {
     var isSignedIn: Bool { account != nil }
 
     @ObservationIgnored let auth: GoogleAuth
-    /// Demo mode runs the real services against an in-process fake Google. It is on until a
-    /// Google client ID is configured, or can be forced with the EC_MOCK=1/0 environment variable.
-    let isDemoMode: Bool
-    @ObservationIgnored private let mockBackend: MockGoogleBackend?
     @ObservationIgnored private let database: LocalStore?
     @ObservationIgnored private let mail: MailService?
     @ObservationIgnored private let calendarService: CalendarService?
     @ObservationIgnored let plannerService: PlannerService?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private var hasStarted = false
-    @ObservationIgnored private var isResettingDemo = false
     @ObservationIgnored private var undoTask: Task<Void, Never>?
     @ObservationIgnored private var undoID: UUID?
     /// Runs after a mail undo succeeds, for actions that also changed local data (Move to To-do).
@@ -137,31 +137,9 @@ final class AppStore {
         launchAtLogin = defaults.object(forKey: "launchAtLogin") as? Bool ?? true
         // First launch shows mail alone; after that the drawers come back the way they were left.
         drawerPosition = max(-1, min(1, defaults.object(forKey: "drawer.position") as? Int ?? 0))
-        let forced = ProcessInfo.processInfo.environment["EC_MOCK"]
-        isDemoMode = forced.map { $0 == "1" } ?? ((try? GoogleOAuthConfiguration.fromBundle()) == nil)
         do {
-            let local: LocalStore
-            let api: GoogleAPI
-            if isDemoMode {
-                // EC_DEMO_DIR keeps throwaway renders and experiments away from the real demo data.
-                let mockFile = ProcessInfo.processInfo.environment["EC_DEMO_DIR"]
-                    .map { URL(fileURLWithPath: $0).appendingPathComponent("google.json") } ?? MockGoogleBackend.defaultFileURL()
-                let cacheFile = mockFile?.deletingLastPathComponent().appendingPathComponent("cache.sqlite")
-                if defaults.bool(forKey: "resetDemoDataOnLaunch"), let mockFile, let cacheFile {
-                    defaults.removeObject(forKey: "resetDemoDataOnLaunch")
-                    for file in [mockFile, cacheFile] {
-                        for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: file.path + suffix) }
-                    }
-                }
-                let backend = MockGoogleBackend(fileURL: mockFile)
-                mockBackend = backend
-                local = try LocalStore(url: cacheFile)
-                api = GoogleAPI(auth: MockTokenProvider(), session: MockGoogleURLProtocol.session(backend: backend))
-            } else {
-                mockBackend = nil
-                local = try LocalStore()
-                api = GoogleAPI(auth: auth)
-            }
+            let local = try LocalStore()
+            let api = GoogleAPI(auth: auth)
             database = local
             mail = MailService(api: api, store: local)
             calendarService = CalendarService(api: api, store: local)
@@ -173,51 +151,16 @@ final class AppStore {
         }
     }
 
-    static let demoAccount = Account(id: MockGoogleBackend.accountEmail, email: MockGoogleBackend.accountEmail,
-                                     displayName: MockGoogleBackend.accountName)
-
-    /// Demo mode: drop a new email into the fake inbox, as if it just arrived.
-    func simulateIncomingMail() async {
-        guard let mockBackend else { return }
-        mockBackend.simulateIncomingMail()
-        await refresh()
-    }
-
-    /// Demo mode: start over with fresh seed data, relative to today.
-    func resetDemoData() {
-        guard isDemoMode, !isResettingDemo, !isQuitting else { return }
-        isResettingDemo = true
-        let previousAccount = account
-        account = nil
-        composition?.session.cancel()
-        UserDefaults.standard.set(true, forKey: "resetDemoDataOnLaunch")
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.createsNewApplicationInstance = true
-        let bundle = Bundle.main.bundleURL
-        Task {
-            defer { isResettingDemo = false }
-            await mail?.cancelAllOperations()
-            await calendarService?.cancelAllOperations()
-            do {
-                try await ApplicationRestart.perform(launch: {
-                    _ = try await NSWorkspace.shared.openApplication(at: bundle, configuration: configuration)
-                }, terminate: { NSApp.terminate(nil) })
-            } catch {
-                UserDefaults.standard.removeObject(forKey: "resetDemoDataOnLaunch")
-                account = previousAccount
-                composition?.session.resume()
-                await loadCache()
-                reportError(error)
-            }
-        }
-    }
-
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
-        account = isDemoMode ? Self.demoAccount : auth.account
-        if !isDemoMode, let error = auth.restorationError { errorMessage = error }
-        if !isDemoMode, account == nil, auth.isSignedIn, let database {
+        account = auth.account
+        if errorMessage == nil { errorMessage = auth.restorationError }
+        if errorMessage == nil {
+            do { _ = try GoogleOAuthConfiguration.fromBundle() }
+            catch { reportError(error) }
+        }
+        if account == nil, auth.isSignedIn, let database {
             do { account = try await database.metadata(Account.self, key: "activeAccount", accountID: "app") }
             catch { reportError(error) }
         }
@@ -231,7 +174,6 @@ final class AppStore {
             catch { reportError(error) }
         }
         await refresh()
-        await seedDemoPlannerIfNeeded()
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(60)) } catch { return }
@@ -241,7 +183,7 @@ final class AppStore {
     }
 
     func signIn() async {
-        guard !isSigningIn, !isDemoMode, !isQuitting else { return }
+        guard !isSigningIn, !isQuitting else { return }
         isSigningIn = true
         do {
             account = try await auth.signIn()
@@ -264,7 +206,7 @@ final class AppStore {
     }
 
     func signOut() async {
-        guard !isSigningIn, !isDemoMode, !isQuitting else { return }
+        guard !isSigningIn, !isQuitting else { return }
         isSigningIn = true
         defer { isSigningIn = false }
         // Save the open email to Gmail, or keep a local copy that reopens at the next sign-in, before it closes.
@@ -297,10 +239,31 @@ final class AppStore {
         }
     }
 
+    /// ⌘R and the Refresh buttons. Never dropped: pressed during another refresh, it runs right after that one.
+    /// Its errors show even when the same banner was closed, and it asks Gmail again for the open search.
+    func refreshNow() async {
+        guard account != nil else { return }
+        manualRefreshQueued = true
+        refreshProgressTask?.cancel()
+        refreshProgress = .running
+        await refresh()
+    }
+
     func refresh() async {
-        guard !isRefreshing, let account, let mail, let calendarService else { return }
+        guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
+        repeat {
+            let manual = manualRefreshQueued
+            manualRefreshQueued = false
+            let synced = await syncOnce(manual: manual)
+            if manual { finishManualRefresh(synced: synced) }
+        } while manualRefreshQueued
+    }
+
+    /// One pass over mail and calendar. True when both synced for the account that is still signed in.
+    private func syncOnce(manual: Bool) async -> Bool {
+        guard let account, let mail, let calendarService else { return false }
         var failure: String?
         // Independent services let the calendar appear while sent-history seeding is still running.
         let progress: @Sendable (MailSnapshot) async -> Void = { [weak self] snapshot in
@@ -311,10 +274,10 @@ final class AppStore {
         do {
             try await calendarTask.value
             if self.account?.id == account.id { try await loadCalendarCache(accountID: account.id) }
-        } catch { reportRefreshError(error, failure: &failure) }
+        } catch { reportRefreshError(error, failure: &failure, manual: manual) }
         do {
             let snapshot = try await mailTask.value
-            guard self.account?.id == account.id else { return }
+            guard self.account?.id == account.id else { return false }
             apply(snapshot)
             let surfaced = try await mail.processDueBubbles(account: account)
             if !surfaced.isEmpty {
@@ -322,12 +285,26 @@ final class AppStore {
                 await notifyBubbles(surfaced)
             }
             lastSyncedAt = .now
-        } catch { reportRefreshError(error, failure: &failure) }
+        } catch { reportRefreshError(error, failure: &failure, manual: manual) }
         // An "offline" banner from an earlier refresh goes away once syncing works again.
         if failure == nil, let shown = refreshError, errorMessage == shown { errorMessage = nil }
         refreshError = failure
         await saveParkedDrafts(accountID: account.id)
         await refreshSendAddresses(account: account)
+        // Syncing only updates results already shown; asking again brings in new matches.
+        if manual, !searchQuery.isEmpty, self.account?.id == account.id { await search(searchQuery) }
+        return failure == nil && self.account?.id == account.id
+    }
+
+    /// "Updated" for a moment, unless the pass ended in a banner or another ⌘R is waiting its turn.
+    private func finishManualRefresh(synced: Bool) {
+        guard !manualRefreshQueued else { return }
+        guard synced, errorMessage == nil else { refreshProgress = nil; return }
+        refreshProgress = .updated
+        refreshProgressTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            self?.refreshProgress = nil
+        }
     }
 
     /// Checked every few minutes, so an alias added in Gmail appears without a relaunch.
@@ -422,6 +399,33 @@ final class AppStore {
         return hydrated
     }
 
+    /// Body downloads in flight, so a Power Through card and the prefetch ahead of it share one.
+    @ObservationIgnored private var bodyFetches: [String: Task<Void, Error>] = [:]
+
+    /// Downloads the full bodies of these threads, then re-reads the cache once for all of them, not once each:
+    /// every re-read redraws the whole mail page.
+    func hydrateBodies(of threads: [MailThread]) async throws {
+        guard let mail, let account else { throw AppError.signInRequired }
+        let pending = threads.filter { $0.accountID == account.id && $0.messages.contains(where: \.needsBodyHydration) }
+        guard !pending.isEmpty else { return }
+        var started: [String] = []
+        let fetches = pending.map { thread in
+            if let fetch = bodyFetches[thread.id] { return fetch }
+            let fetch = Task { _ = try await mail.fetchThread(id: thread.id, account: account) }
+            bodyFetches[thread.id] = fetch
+            started.append(thread.id)
+            return fetch
+        }
+        defer { for id in started { bodyFetches[id] = nil } }
+        var failure: Error?
+        for fetch in fetches {
+            do { try await fetch.value } catch { failure = failure ?? error }
+        }
+        // Whoever started a download re-reads the cache; a caller that only joined one waits for that.
+        if !started.isEmpty { try await loadMailCache(accountID: account.id) }
+        if let failure { throw failure }
+    }
+
     /// Search membership can change while reading a thread; the open page still follows its cache.
     var openThread: MailThread? {
         guard let openThreadID else { return nil }
@@ -470,6 +474,9 @@ final class AppStore {
             }
         }
         return result.sorted {
+            if mailbox == .imbox && searchQuery.isEmpty {
+                return MailThread.imboxPrecedes($0, $1, openedUnreadID: openedUnreadID)
+            }
             if mailbox == .imbox {
                 return max($0.bubbledAt ?? .distantPast, $0.updatedAt) > max($1.bubbledAt ?? .distantPast, $1.updatedAt)
             }
@@ -519,9 +526,10 @@ final class AppStore {
     /// Power Through's "Mark all as seen": the given threads move to Previously Seen, then back to the Imbox.
     func markAllSeen(_ threads: [MailThread]) async {
         guard let mail, let account else { return }
+        let seenAt = Date.now
         do {
             for thread in threads where thread.unread && thread.accountID == account.id {
-                _ = try await mail.markUnread(threadID: thread.id, unread: false, account: account)
+                _ = try await mail.markUnread(threadID: thread.id, unread: false, seenAt: seenAt, account: account)
             }
             if self.account?.id == account.id { try await loadMailCache(accountID: account.id) }
         } catch { reportError(error) }
@@ -610,7 +618,8 @@ final class AppStore {
         await performMailAction { mail, account in try await mail.decide(senders: keys, decision: decision, account: account) }
     }
 
-    func decideSender(key: String, decision: ScreeningDecision) async {
+    @discardableResult
+    func decideSender(key: String, decision: ScreeningDecision) async -> Bool {
         await performMailAction { mail, account in
             try await mail.decide(sender: key, decision: decision, domain: key.hasPrefix("@"), account: account)
         }
@@ -673,7 +682,7 @@ final class AppStore {
         try await parkedDrafts.park(composition.session, id: composition.id.uuidString, title: composition.title,
                                     accountID: accountID, save: parkedSaver(accountID: accountID))
         // The parked record replaces its crash checkpoint.
-        try? await database.removeMetadata(key: DraftRecovery.metadataKey, accountID: accountID)
+        try? await database.removeDraftRecovery(ifMatching: composition.session.outgoing, accountID: accountID)
         if self.composition?.id == composition.id { self.composition = nil }
         errorMessage = "Gmail can't be reached, so “\(composition.title)” is kept on this Mac. It goes to Drafts when you're back online."
     }
@@ -701,7 +710,7 @@ final class AppStore {
         guard let account, let mail else { throw AppError.signInRequired }
         let result = try await mail.saveDraft(outgoing, account: account)
         do {
-            if !isQuitting { try await database?.removeMetadata(key: DraftRecovery.metadataKey, accountID: account.id) }
+            if !isQuitting { try await database?.removeDraftRecovery(ifMatching: result, accountID: account.id) }
             try await loadMailCache(accountID: account.id)
         }
         catch { errorMessage = "Draft saved to Gmail, but the local view could not refresh: \(error.localizedDescription)" }
@@ -714,7 +723,7 @@ final class AppStore {
         do { try await mail.discardDraft(outgoing, account: account) }
         catch { composition.session.resume(); throw error }
         composition.session.cancel()
-        try? await database?.removeMetadata(key: DraftRecovery.metadataKey, accountID: account.id)
+        try? await database?.removeDraftRecovery(ifMatching: outgoing, accountID: account.id)
         if self.composition?.id == composition.id { self.composition = nil }
         try? await loadMailCache(accountID: account.id)
     }
@@ -732,12 +741,12 @@ final class AppStore {
             // An earlier send of this draft was interrupted: look it up in Gmail, never send it again.
             let receipt = try await mail.send(outgoing, account: account)
             if let warning = receipt.warning { errorMessage = warning }
-            try? await database?.removeMetadata(key: DraftRecovery.metadataKey, accountID: account.id)
+            try? await database?.removeDraftRecovery(ifMatching: outgoing, accountID: account.id)
             try? await loadMailCache(accountID: account.id)
             return
         }
         guard self.account?.id == account.id else { return }
-        try? await database?.removeMetadata(key: DraftRecovery.metadataKey, accountID: account.id)
+        try? await database?.removeDraftRecovery(ifMatching: outgoing, accountID: account.id)
         pendingSends.removeAll { $0.draftID == pending.draftID }
         pendingSends.append(pending)
         schedulePendingSend(pending, accountID: account.id)
@@ -978,10 +987,11 @@ final class AppStore {
         NSApp.activate(ignoringOtherApps: true)
     }
     /// Offline, every poll fails the same way: once dismissed, that banner stays away until something else goes wrong.
-    private func reportRefreshError(_ error: any Error, failure: inout String?) {
+    /// A refresh asked for with ⌘R or Refresh brings it back, so pressing it never looks like nothing happened.
+    private func reportRefreshError(_ error: any Error, failure: inout String?, manual: Bool) {
         guard !(error is CancellationError) else { return }
         let text = error.localizedDescription, shown = errorMessage
-        let dismissed = text == refreshError && shown != text
+        let dismissed = !manual && text == refreshError && shown != text
         failure = text
         reportError(error)
         if dismissed, account != nil { errorMessage = shown }
@@ -990,7 +1000,7 @@ final class AppStore {
     func reportError(_ error: any Error) {
         if error is CancellationError { return }
         errorMessage = error.localizedDescription
-        if !isDemoMode && account != nil && !auth.isSignedIn {
+        if account != nil && !auth.isSignedIn {
             account = nil; threads = []; cachedThreads = []; calendars = []; events = []
             senderRules = []; remoteImageSenders = []; selectedThreadID = nil; planner = PlannerSnapshot()
         }
@@ -1140,5 +1150,9 @@ struct SentConfirmation: Equatable {
     var subject: String
     var threadID: String
     var id = UUID()
+}
+
+enum RefreshProgress {
+    case running, updated
 }
 #endif

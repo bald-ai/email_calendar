@@ -82,4 +82,31 @@ final class ParkedDraftsTests: XCTestCase {
         XCTAssertFalse(ParkedDrafts.isConnectivityFailure(GoogleAPIError.http(status: 400, message: "Bad request")))
         XCTAssertFalse(ParkedDrafts.isConnectivityFailure(MIMEComposerError.invalidAddress("x")))
     }
+
+    func testSavingParkedDraftPreservesAnotherComposersRecovery() async throws {
+        let store = try store(), gmail = FakeGmail()
+        let parked = ParkedDrafts(store: store)
+        let closed = email("Closed while offline")
+        try await parked.park(closed, id: "closed", title: "Closed", accountID: "owner", save: { outgoing in
+            let saved = try await gmail.save(outgoing)
+            try await store.removeDraftRecovery(ifMatching: saved, accountID: "owner")
+            return saved
+        })
+        let open = email("Still editing")
+        let recovery = DraftRecovery(title: "Open", buffer: try XCTUnwrap(open.recoveryBuffer))
+        try await store.setMetadata(recovery, key: DraftRecovery.metadataKey, accountID: "owner")
+
+        gmail.online = true
+        let failures = await parked.saveAll(accountID: "owner")
+        XCTAssertTrue(failures.isEmpty)
+        XCTAssertEqual(parked.count, 0)
+        let retained = try await store.metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: "owner")
+        XCTAssertEqual(retained, recovery, "Saving a different draft must not erase the open email's crash recovery")
+
+        var savedOpen = open.outgoing
+        savedOpen.draftID = "new-gmail-id"
+        try await store.removeDraftRecovery(ifMatching: savedOpen, accountID: "owner")
+        let cleared = try await store.metadata(DraftRecovery.self, key: DraftRecovery.metadataKey, accountID: "owner")
+        XCTAssertNil(cleared, "Saving the checkpoint's own message clears it even when Gmail just assigned its ID")
+    }
 }

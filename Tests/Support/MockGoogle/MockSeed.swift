@@ -1,4 +1,5 @@
 import Foundation
+@testable import EmailCalendarCore
 
 /// Demo mailbox and calendars, generated relative to the first launch.
 enum MockSeed {

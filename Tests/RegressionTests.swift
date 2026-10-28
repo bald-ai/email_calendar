@@ -219,6 +219,21 @@ struct CalendarRegressions {
         // A zero-length event (Google's "0 mins") belongs to the day it starts on.
         #expect(Set(index.events(on: midnight.addingTimeInterval(-60)).map(\.id)) == [crossing.id, exclusive.id, invalid.id])
     }
+
+    @Test func zeroMinuteRemindersAtMidnightBelongToExactlyOneDay() {
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = prague
+        for date in ["2026-10-13", "2026-10-25", "2027-03-28"] {
+            let midnight = CalendarDates.day(date, calendar: calendar)!
+            let point = CalendarEvent(id: "point", calendarID: "main", accountID: "owner", start: midnight, end: midnight)
+            let previous = calendar.date(byAdding: .day, value: -1, to: midnight)!
+            let next = calendar.date(byAdding: .day, value: 1, to: midnight)!
+            #expect(CalendarDates.overlaps(point, day: midnight, calendar: calendar))
+            #expect(!CalendarDates.overlaps(point, day: previous, calendar: calendar))
+            #expect(!CalendarDates.overlaps(point, day: next, calendar: calendar))
+            let ending = CalendarEvent(id: "ending", calendarID: "main", accountID: "owner", start: previous, end: midnight)
+            #expect(!CalendarDates.overlaps(ending, day: midnight, calendar: calendar))
+        }
+    }
 }
 
 private actor DraftSaveRecorder {
@@ -447,26 +462,6 @@ struct LifecycleRegressions {
         state.finish(id)
         #expect(state.begin(id))
     }
-
-    @Test @MainActor func restartWaitsForLaunchAndDoesNotQuitAfterFailure() async throws {
-        var order: [String] = []
-        let task = Task {
-            try await ApplicationRestart.perform(launch: {
-                order.append("starting")
-                try await Task.sleep(for: .milliseconds(20))
-                order.append("launched")
-            }, terminate: { order.append("terminated") })
-        }
-        while order.isEmpty { await Task.yield() }
-        #expect(order == ["starting"])
-        try await task.value
-        #expect(order == ["starting", "launched", "terminated"])
-        var terminated = false
-        await #expect(throws: URLError.self) {
-            try await ApplicationRestart.perform(launch: { throw URLError(.cannotLoadFromNetwork) }, terminate: { terminated = true })
-        }
-        #expect(!terminated)
-    }
 }
 
 @Suite("Calendar write and cache regressions")
@@ -651,6 +646,32 @@ struct CalendarStorageRegressions {
 
 @Suite("Mail queue, search, and body regressions")
 struct MailRegressions {
+    @Test(arguments: [false, true])
+    func discardedDraftStaysDiscardedWhenRefreshFails(onlyDraft: Bool) async throws {
+        let context = try RegressionContext { request in
+            if request.httpMethod == "DELETE", request.url!.path.hasSuffix("/drafts/discard-me") { return json("{}") }
+            return (403, Data(#"{"error":{"message":"Thread refresh refused"}}"#.utf8))
+        }
+        defer { context.cleanup() }
+        let account = Account(id: "owner", email: "owner@example.com")
+        try await context.prepareMail(account)
+        try await context.store.setMetadata(["draft-message": "discard-me"], key: "draftIDs", accountID: account.id)
+        let original = MailMessage(id: "received", threadID: "conversation", accountID: account.id,
+                                   from: MailAddress(email: "friend@example.com"), labels: ["INBOX"])
+        let draft = MailMessage(id: "draft-message", threadID: "conversation", accountID: account.id,
+                                from: MailAddress(email: account.email), labels: ["DRAFT"], draftID: "discard-me")
+        let thread = MailThread(id: "conversation", accountID: account.id, messages: onlyDraft ? [draft] : [original, draft],
+                                labels: onlyDraft ? ["DRAFT"] : ["INBOX", "DRAFT"])
+        try await context.store.save(thread, id: thread.id, collection: "threads", accountID: account.id)
+        let service = MailService(api: context.api, store: context.store)
+        do { try await service.discardDraft(OutgoingMessage(draftID: "discard-me"), account: account) }
+        catch { Issue.record("Gmail confirmed deletion, so the composer must close even if the refresh fails: \(error)") }
+        let cached = try await service.cached(accountID: account.id).threads
+        #expect(!cached.contains { $0.labels.contains("DRAFT") || $0.messages.contains { $0.draftID == "discard-me" } })
+        #expect(cached.flatMap(\.messages).map(\.id) == (onlyDraft ? [] : ["received"]))
+        #expect(context.transport.recorded().filter { $0.httpMethod == "DELETE" }.count == 1)
+    }
+
     @Test func bubbleTimerSurvivesARefreshFailureAfterGmailAcceptsTheMove() async throws {
         let backend = MockGoogleBackend(fileURL: nil)
         let failure = BubbleRefreshFailure(backend: backend)

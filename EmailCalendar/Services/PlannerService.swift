@@ -39,14 +39,6 @@ actor PlannerService {
     func remove(linkID: String, accountID: String) async throws {
         try await store.remove(id: linkID, collection: Self.linkCollection, accountID: accountID)
     }
-
-    func isSeeded(accountID: String) async throws -> Bool {
-        try await store.metadata(Bool.self, key: "planner.seeded", accountID: accountID) == true
-    }
-
-    func markSeeded(accountID: String) async throws {
-        try await store.setMetadata(true, key: "planner.seeded", accountID: accountID)
-    }
 }
 
 /// The next few days as an agenda: all-day events first, then timed ones in order.

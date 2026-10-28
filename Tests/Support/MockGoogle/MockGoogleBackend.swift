@@ -1,4 +1,5 @@
 import Foundation
+@testable import EmailCalendarCore
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -7,10 +8,10 @@ import FoundationNetworking
 ///
 /// It speaks the same JSON as Google, so MailService and CalendarService run their real
 /// sync, label, filter, draft and recurrence code against it. State is persisted to a JSON
-/// file, so changes survive relaunches. Connecting real Google later only swaps the transport.
-public final class MockGoogleBackend: @unchecked Sendable {
-    public static let accountEmail = "you@example.com"
-    public static let accountName = "Alex Rivera"
+/// file, so tests can reopen persisted state.
+final class MockGoogleBackend: @unchecked Sendable {
+    static let accountEmail = "you@example.com"
+    static let accountName = "Alex Rivera"
 
     private let lock = NSLock()
     private let fileURL: URL?
@@ -18,7 +19,7 @@ public final class MockGoogleBackend: @unchecked Sendable {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    public init(fileURL: URL?, now: Date = .now) {
+    init(fileURL: URL?, now: Date = .now) {
         self.fileURL = fileURL
         if let fileURL, let data = try? Data(contentsOf: fileURL),
            let saved = try? JSONDecoder().decode(MockState.self, from: data) {
@@ -35,18 +36,11 @@ public final class MockGoogleBackend: @unchecked Sendable {
         persist()
     }
 
-    /// The default on-disk location, kept apart from any future real-account data.
-    public static func defaultFileURL() -> URL? {
-        guard let base = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                                      appropriateFor: nil, create: true) else { return nil }
-        return base.appendingPathComponent("EmailCalendar/Mock", isDirectory: true).appendingPathComponent("google.json")
-    }
-
     // MARK: Simulation hooks
 
     /// Delivers a new incoming email, applying Gmail filters like the real server would.
     @discardableResult
-    public func simulateIncomingMail(now: Date = .now) -> String {
+    func simulateIncomingMail(now: Date = .now) -> String {
         locked {
             let template = MockSeed.nextArrival(index: state.simulatedCount, knownThreads: state.threadIDs(), state: state)
             state.simulatedCount += 1
@@ -618,16 +612,16 @@ public final class MockGoogleBackend: @unchecked Sendable {
 }
 
 /// Routes URLSession traffic for the Google hosts to a MockGoogleBackend.
-public final class MockGoogleURLProtocol: URLProtocol, @unchecked Sendable {
-    nonisolated(unsafe) public static var backend: MockGoogleBackend?
+final class MockGoogleBackendURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var backend: MockGoogleBackend?
 
-    public override class func canInit(with request: URLRequest) -> Bool {
+    override class func canInit(with request: URLRequest) -> Bool {
         guard let host = request.url?.host else { return false }
         return host == "gmail.googleapis.com" || host == "www.googleapis.com"
     }
-    public override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
-    public override func startLoading() {
+    override func startLoading() {
         guard let backend = Self.backend, let url = request.url else {
             client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost)); return
         }
@@ -645,18 +639,18 @@ public final class MockGoogleURLProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocol(self, didLoad: result.body)
         client?.urlProtocolDidFinishLoading(self)
     }
-    public override func stopLoading() {}
+    override func stopLoading() {}
 
     /// A session whose Google traffic never leaves the process.
-    public static func session(backend: MockGoogleBackend) -> URLSession {
+    static func session(backend: MockGoogleBackend) -> URLSession {
         Self.backend = backend
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockGoogleURLProtocol.self]
+        configuration.protocolClasses = [MockGoogleBackendURLProtocol.self]
         return URLSession(configuration: configuration)
     }
 }
 
-public struct MockTokenProvider: GoogleTokenProvider {
-    public init() {}
-    public func accessToken(forceRefresh: Bool) async throws -> String { "mock-token" }
+struct MockTokenProvider: GoogleTokenProvider {
+    init() {}
+    func accessToken(forceRefresh: Bool) async throws -> String { "mock-token" }
 }
