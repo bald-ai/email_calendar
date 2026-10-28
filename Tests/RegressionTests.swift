@@ -216,7 +216,8 @@ struct CalendarRegressions {
         var invalid = crossing; invalid.id = "invalid"; invalid.end = invalid.start
         let index = EventDayIndex([crossing, exclusive, invalid], calendar: calendar)
         #expect(index.events(on: midnight).map(\.id) == [crossing.id])
-        #expect(Set(index.events(on: midnight.addingTimeInterval(-60)).map(\.id)) == [crossing.id, exclusive.id])
+        // A zero-length event (Google's "0 mins") belongs to the day it starts on.
+        #expect(Set(index.events(on: midnight.addingTimeInterval(-60)).map(\.id)) == [crossing.id, exclusive.id, invalid.id])
     }
 }
 
@@ -619,7 +620,7 @@ struct CalendarStorageRegressions {
         _ = try await CalendarService(api: context.api, store: context.store).update(edit, scope: .allEvents, originalEvent: original)
         let patch = try #require(context.transport.recorded().first { $0.httpMethod == "PATCH" })
         let body = try JSONSerialization.jsonObject(with: patch.httpBody!) as! [String: Any]
-        #expect((body["start"] as? [String: String])?["dateTime"] == "2026-01-13T09:00:00Z")
+        #expect(((body["start"] as? [String: Any])?["dateTime"] as? String) == "2026-01-13T09:00:00Z")
     }
 
     @Test func emptyIncrementalSyncDoesNotRewriteTheCollection() async throws {

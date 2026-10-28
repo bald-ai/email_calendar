@@ -207,6 +207,9 @@ final class ComposerTextView: NSTextView {
            !urls.isEmpty, urls.allSatisfy(Self.isImage) {
             insertImageFiles(urls); return true
         }
+        // Cells from Excel or Numbers come with a picture of themselves next to the text: the text wins
+        // unless the image is what was copied first (a screenshot, Copy Image).
+        if board.string(forType: .string) != nil, let first = board.types?.first, first != .png, first != .tiff { return false }
         let data = board.data(forType: .png) ?? board.data(forType: .tiff)
         guard let data, let image = Self.emailImage(data, name: nextPastedName()) else { return false }
         insert(attachmentString(image))
@@ -214,12 +217,17 @@ final class ComposerTextView: NSTextView {
     }
 
     func insertImageFiles(_ urls: [URL]) {
+        var undecodable: [URL] = []
         for url in urls {
             let accessed = url.startAccessingSecurityScopedResource()
             defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-            guard let data = try? Data(contentsOf: url), let image = Self.emailImage(data, name: url.lastPathComponent) else { continue }
+            guard let data = try? Data(contentsOf: url), let image = Self.emailImage(data, name: url.lastPathComponent) else {
+                undecodable.append(url); continue
+            }
             insert(attachmentString(image))
         }
+        // Images that can't be shown inline (SVG, PSD…) still go along, as attachments.
+        if !undecodable.isEmpty { onFiles(undecodable) }
     }
 
     /// Goes through the normal text-change path, so ⌘Z removes it and the composer sees the change.

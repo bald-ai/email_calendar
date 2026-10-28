@@ -79,6 +79,8 @@ private final class MailMockServer: @unchecked Sendable {
     private var nextFilter = 0
     private var failNextModify = false
     private var expiredHistory = false
+    private var threadHistory: [String: String] = [:]
+    private var fetchedThreadIDs: [String] = []
     private var sentTokens: [String] = []
     private var changedIDs: Set<String> = []
     private var recordedRequestCount = 0
@@ -126,6 +128,17 @@ private final class MailMockServer: @unchecked Sendable {
     func addSentPart(threadID: String) {
         lock.withLock { messages["reply"] = Message(id: "reply", threadID: threadID, from: "owner@example.com", to: "known@example.com", labels: ["SENT"]) }
     }
+    func addArchived(id: String, from: String) {
+        lock.withLock { messages[id] = Message(id: id, threadID: id, from: from, to: "owner@example.com", labels: []) }
+    }
+    /// You write to someone new from Gmail on your phone, and they reply in the same thread.
+    func conversationStartedOnPhone(with contact: String) {
+        lock.withLock {
+            messages["phone-sent"] = Message(id: "phone-sent", threadID: "phone", from: "owner@example.com", to: contact, labels: ["SENT"])
+            messages["phone-reply"] = Message(id: "phone-reply", threadID: "phone", from: contact, to: "owner@example.com", labels: ["INBOX", "UNREAD"])
+            changedIDs.insert("phone")
+        }
+    }
     func trashOnPhone(messageID: String) {
         lock.withLock {
             messages[messageID]?.labels.insert("TRASH")
@@ -150,6 +163,9 @@ private final class MailMockServer: @unchecked Sendable {
     /// The next draft send answers with this HTTP status instead of sending (404 draft gone, 503 lost response).
     func failNextDraftSend(status: Int) { lock.withLock { draftSendFailure = status } }
     func expireHistory() { lock.withLock { expiredHistory = true } }
+    /// Gives a thread a Gmail history ID, reported both in thread lists and when the thread is read.
+    func setHistory(_ history: String, thread: String) { lock.withLock { threadHistory[thread] = history } }
+    func takeFetchedThreadIDs() -> [String] { lock.withLock { defer { fetchedThreadIDs = [] }; return fetchedThreadIDs } }
     func failOneMutation() { lock.withLock { failNextModify = true } }
     func labels(messageID: String) -> Set<String> { lock.withLock { messages[messageID]?.labels ?? [] } }
     var filterCount: Int { lock.withLock { filters.count } }
@@ -166,7 +182,7 @@ private final class MailMockServer: @unchecked Sendable {
             if let data = request.httpBody { body = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:] }
             else { body = [:] }
             func thread(_ id: String) -> [String: Any] {
-                ["id": id, "historyId": "101", "messages": messages.values.filter { $0.threadID == id }.map(\.json)]
+                ["id": id, "historyId": threadHistory[id] ?? "101", "messages": messages.values.filter { $0.threadID == id }.map(\.json)]
             }
             if path == ["profile"] { return (200, ["emailAddress": "owner@example.com", "historyId": "100"]) }
             if path == ["labels"] {
@@ -222,7 +238,7 @@ private final class MailMockServer: @unchecked Sendable {
                 let matches = messages.values.filter { message in
                     (labels.isEmpty || !message.labels.isDisjoint(with: labels)) && (sender == nil || message.from.hasSuffix(sender!))
                 }
-                return (200, ["threads": Set(matches.map(\.threadID)).map { ["id": $0] }])
+                return (200, ["threads": Set(matches.map(\.threadID)).map { id in threadHistory[id].map { ["id": id, "historyId": $0] } ?? ["id": id] }])
             }
             if path == ["history"] {
                 if expiredHistory { return (404, ["error": ["message": "Expired history"]]) }
@@ -249,7 +265,10 @@ private final class MailMockServer: @unchecked Sendable {
                 if path[0] == "threads" { return (200, thread(path[1])) }
                 return (200, messages[path[1]]?.json ?? [:])
             }
-            if path.count == 2, path[0] == "threads", messages.values.contains(where: { $0.threadID == path[1] }) { return (200, thread(path[1])) }
+            if path.count == 2, path[0] == "threads", messages.values.contains(where: { $0.threadID == path[1] }) {
+                fetchedThreadIDs.append(path[1])
+                return (200, thread(path[1]))
+            }
             return (404, ["error": ["message": "Missing mock endpoint \(path)"]])
         }
     }
@@ -463,6 +482,20 @@ final class MailServiceTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(server.labels(messageID: "known").contains("bubble"))
     }
 
+    func testRebuildDownloadsOnlyThreadsThatChanged() async throws {
+        let (service, _, server, account) = try fixture()
+        server.setHistory("h1", thread: "known"); server.setHistory("h1", thread: "unknown")
+        _ = try await service.sync(account: account)
+        XCTAssertEqual(Set(server.takeFetchedThreadIDs()).intersection(["known", "unknown"]), ["known", "unknown"])
+        server.expireHistory()
+        server.setHistory("h2", thread: "known")
+        let snapshot = try await service.sync(account: account)
+        let fetched = server.takeFetchedThreadIDs()
+        XCTAssertTrue(fetched.contains("known"))
+        XCTAssertFalse(fetched.contains("unknown"), "An unchanged cached thread is not downloaded again")
+        XCTAssertTrue(snapshot.threads.contains { $0.id == "unknown" }, "and it stays in the cache")
+    }
+
     func testExpiredHistoryRebuildsCacheWithoutLosingSenderDecisions() async throws {
         let (service, _, server, account) = try fixture()
         _ = try await service.sync(account: account)
@@ -472,6 +505,27 @@ final class MailServiceTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(snapshot.threads.contains(where: { $0.id == "after-expiration" }))
         XCTAssertEqual(snapshot.rules.first(where: { $0.key == "known@example.com" })?.decision, .approved)
         XCTAssertEqual(server.requestedSentTokens, ["first", "second"], "Successful Sent seeding runs once")
+    }
+
+    func testApprovingASenderReleasesScreenedMailButLeavesArchivedMailArchived() async throws {
+        let (service, store, server, account) = try fixture()
+        try await markInboxSeeded(store, account)
+        server.addArchived(id: "old", from: "new@example.net")
+        _ = try await service.sync(account: account)
+        XCTAssertTrue(server.labels(messageID: "unknown").contains("screen"))
+        _ = try await service.decide(sender: "new@example.net", decision: .approved, account: account)
+        XCTAssertTrue(server.labels(messageID: "unknown").contains("INBOX"))
+        XCTAssertFalse(server.labels(messageID: "old").contains("INBOX"))
+    }
+
+    func testReplyFromSomeoneYouWroteToOnYourPhoneStaysInTheInbox() async throws {
+        let (service, _, server, account) = try fixture()
+        _ = try await service.sync(account: account)
+        server.conversationStartedOnPhone(with: "recruiter@example.net")
+        let snapshot = try await service.sync(account: account)
+        XCTAssertTrue(server.labels(messageID: "phone-reply").contains("INBOX"))
+        XCTAssertFalse(server.labels(messageID: "phone-reply").contains("screen"))
+        XCTAssertEqual(snapshot.rules.first(where: { $0.key == "recruiter@example.net" })?.decision, .approved)
     }
 
     func testSenderApprovalReleasesMailThatArrivedDuringFilterRemoval() async throws {

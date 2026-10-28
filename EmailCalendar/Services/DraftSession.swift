@@ -134,6 +134,8 @@ final class DraftSession {
             do { try await sender(outgoing) }
             catch {
                 if error is MailDeliveryUncertainError { sendNeedsVerification = true }
+                // Gmail confirmed the draft was never sent, so it can be edited again.
+                if case PendingSendError.notSent = error { sendNeedsVerification = false }
                 throw error
             }
             sendNeedsVerification = false
@@ -153,6 +155,14 @@ final class DraftSession {
     private enum SessionError: LocalizedError {
         case notConfigured
         var errorDescription: String? { "The draft is not ready to save to Gmail." }
+    }
+
+    /// For Discard: no more autosaves, but a save already under way finishes so its draft ID is known.
+    func stopSaving() async -> OutgoingMessage {
+        isCancelled = true
+        debounce?.cancel(); debounce = nil
+        if let saving { _ = try? await saving.value }
+        return outgoing
     }
 
     func cancel() { isCancelled = true; debounce?.cancel(); debounce = nil; saving?.cancel(); sending?.cancel() }

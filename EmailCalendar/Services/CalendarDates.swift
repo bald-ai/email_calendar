@@ -36,9 +36,11 @@ struct EventDayIndex {
     init(_ events: [CalendarEvent] = [], calendar: Calendar = .current) {
         self.calendar = calendar
         all = events
-        for event in events where !event.isCancelled && event.end > event.start {
+        for event in events where !event.isCancelled && event.end >= event.start {
             var day = calendar.startOfDay(for: event.start)
-            while day < event.end {
+            // A zero-length event still belongs to the day it starts on.
+            let end = max(event.end, event.start.addingTimeInterval(1))
+            while day < end {
                 byDay[day, default: []].append(event)
                 guard let next = calendar.date(byAdding: .day, value: 1, to: day), next > day else { break }
                 day = next

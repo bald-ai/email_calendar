@@ -70,6 +70,19 @@ final class EventExtractorTests: XCTestCase {
         XCTAssertEqual(calm.warnings, [])
     }
 
+    func testEndDateHandlingAroundMidnightAndMissingEndTime() throws {
+        // Models often repeat the start date as end_date for a party running past midnight.
+        var party = raw(date: "2026-10-24", start: "22:00", end: "02:00", zone: nil)
+        party.end_date = "2026-10-24"
+        let late = try XCTUnwrap(EventExtractor.resolve(party, now: now, timeZone: prague))
+        XCTAssertEqual(late.end, local("2026-10-25T02:00"))
+
+        var workshop = raw(date: "2026-10-22", start: "09:00", end: nil, zone: nil)
+        workshop.end_date = "2026-10-24"
+        let resolved = try XCTUnwrap(EventExtractor.resolve(workshop, now: now, timeZone: prague))
+        XCTAssertTrue(resolved.warnings.contains { $0.contains("no end time") })
+    }
+
     func testAllDayRangeEndsTheDayAfter() throws {
         var festival = raw(date: "2026-10-21", start: nil)
         festival.end_date = "2026-10-25"

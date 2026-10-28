@@ -12,12 +12,16 @@ struct MailHTMLView: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(height: $height) }
 
-    func makeNSView(context: Context) -> WKWebView {
+    func makeNSView(context: Context) -> MeasuringWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = MeasuringWebView(frame: .zero, configuration: configuration)
+        webView.onWidthChange = { [weak coordinator = context.coordinator, weak webView] in
+            guard let webView else { return }
+            coordinator?.measure(webView)
+        }
         // Email cards have a white background, regardless of the app's appearance.
         webView.appearance = NSAppearance(named: .aqua)
         webView.navigationDelegate = context.coordinator
@@ -25,7 +29,7 @@ struct MailHTMLView: NSViewRepresentable {
         return webView
     }
 
-    func updateNSView(_ webView: WKWebView, context: Context) {
+    func updateNSView(_ webView: MeasuringWebView, context: Context) {
         context.coordinator.height = $height
         let document = Self.document(html: html, allowsRemoteImages: allowsRemoteImages)
         guard context.coordinator.document != document else { return }
@@ -71,7 +75,9 @@ struct MailHTMLView: NSViewRepresentable {
             decisionHandler(.cancel)
         }
 
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { measure(webView) }
+
+        func measure(_ webView: WKWebView) {
             // This app-owned expression measures content; email scripts remain
             // disabled. Clamp exceptionally large messages to a scrollable view.
             webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { [weak self] result, _ in
@@ -79,6 +85,19 @@ struct MailHTMLView: NSViewRepresentable {
                 Task { @MainActor in self?.height.wrappedValue = min(max(number.doubleValue, 80), 2_000) }
             }
         }
+    }
+}
+
+/// Text reflows when the window or a drawer changes the width, so the email is measured again.
+final class MeasuringWebView: WKWebView {
+    var onWidthChange: (() -> Void)?
+    private var measuredWidth: CGFloat = 0
+
+    override func layout() {
+        super.layout()
+        guard abs(bounds.width - measuredWidth) > 1 else { return }
+        measuredWidth = bounds.width
+        onWidthChange?()
     }
 }
 #endif

@@ -227,6 +227,34 @@ struct CalendarServiceTests {
         #expect(requests[3].value(forHTTPHeaderField: "If-Match") == "etag-1")
     }
 
+    @Test("A reply to all events goes to the series and never caches the series itself")
+    func recurringInvitationReplyScopes() async throws {
+        let guest = #","attendees":[{"email":"owner@example.com","self":true,"responseStatus":"needsAction"}]}"#
+        let invite = String(Self.instanceJSON.dropLast()) + guest
+        let master = #"{"id":"weekly","summary":"Planning","start":{"dateTime":"2025-01-03T12:00:00Z"},"end":{"dateTime":"2025-01-03T12:30:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;BYDAY=FR"],"etag":"master-etag""# + guest
+        let fixture = CalendarHTTPFixture { request, _ in
+            let path = request.url!.path
+            if path.hasSuffix("calendarList") { return (200, Self.calendarsJSON) }
+            if path.hasSuffix("/events") { return (200, "{\"items\":[\(invite)],\"nextSyncToken\":\"first\"}") }
+            if path.hasSuffix("/weekly") { return (200, request.httpMethod == "PATCH" ? master.replacingOccurrences(of: "needsAction", with: "accepted") : master) }
+            return (200, request.httpMethod == "PATCH" ? invite.replacingOccurrences(of: "needsAction", with: "declined") : invite)
+        }
+        let (service, _, token, directory) = try context(fixture)
+        defer { cleanup(token: token, directory: directory) }
+        try await service.sync(accountID: "owner")
+        let occurrence = try #require(try await service.cachedEvents(accountID: "owner").first)
+
+        _ = try await service.respond(to: occurrence, status: .accepted, scope: .allEvents)
+        let seriesRequests = fixture.requests().suffix(2)
+        #expect(seriesRequests.map(\.httpMethod) == ["GET", "PATCH"])
+        #expect(seriesRequests.allSatisfy { $0.url!.path.hasSuffix("/weekly") })
+        #expect(try await service.cachedEvents(accountID: "owner").map(\.id) == [occurrence.id], "The series is never shown as an extra event")
+
+        let declined = try await service.respond(to: occurrence, status: .declined)
+        #expect(fixture.requests().last!.url!.path.hasSuffix("/\(occurrence.id)"))
+        #expect(declined.attendees.first?.response == .declined)
+    }
+
     @Test("Editing all recurring events shifts the master and refreshes expanded occurrences")
     func recurringEditScopes() async throws {
         let master = #"{"id":"weekly","summary":"Planning","start":{"dateTime":"2025-01-03T12:00:00Z","timeZone":"UTC"},"end":{"dateTime":"2025-01-03T12:30:00Z","timeZone":"UTC"},"recurrence":["RRULE:FREQ=WEEKLY;BYDAY=FR"],"etag":"master-etag"}"#
@@ -261,8 +289,10 @@ struct CalendarServiceTests {
         #expect(requests[4].url!.path.hasSuffix("/weekly"))
         let payload = try body(requests[4])
         #expect(payload["recurrence"] as? [String] == ["RRULE:FREQ=WEEKLY;BYDAY=FR"])
-        #expect((payload["start"] as? [String: String])?["dateTime"] == "2025-01-03T13:00:00Z")
-        #expect((payload["end"] as? [String: String])?["dateTime"] == "2025-01-03T14:00:00Z")
+        #expect(((payload["start"] as? [String: Any])?["dateTime"] as? String) == "2025-01-03T13:00:00Z")
+        #expect(((payload["end"] as? [String: Any])?["dateTime"] as? String) == "2025-01-03T14:00:00Z")
+        // PATCH merges nested objects: an explicit null clears an all-day date the event may have had.
+        #expect((payload["start"] as? [String: Any])?["date"] is NSNull)
         #expect(requests[4].value(forHTTPHeaderField: "If-Match") == "master-etag")
         #expect(requests[6].url!.path.hasSuffix("/\(instance.id)"))
         #expect(try body(requests[6])["recurrence"] == nil)

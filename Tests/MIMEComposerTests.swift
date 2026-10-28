@@ -24,9 +24,35 @@ final class MIMEComposerTests: XCTestCase {
         XCTAssertNil(try JSONDecoder().decode(MailMessage.self, from: oldData).inReplyTo)
     }
 
-    func testRejectsHeaderInjectionInSubjectAddressAndFilename() throws {
+    func testFlattensLineBreaksInSubjectInsteadOfInjectingHeaders() throws {
+        let raw = try MIMEComposer.compose(OutgoingMessage(to: ["reader@example.com"], subject: "Hello\r\nBcc: intruder@example.com\tnow"),
+                                           from: "owner@example.com")
+        let text = try XCTUnwrap(String(data: raw, encoding: .utf8))
+        XCTAssertFalse(text.contains("\r\nBcc:"))
+        XCTAssertTrue(text.contains("Subject: Hello  Bcc: intruder@example.com now\r\n"))
+    }
+
+    func testBodyAndHeaderUseTheirDeclaredCharset() throws {
+        let text = "Příliš žluťoučký kůň"
+        let body = try XCTUnwrap(text.data(using: .windowsCP1250)).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        let subject = "=?iso-8859-2?B?" + (try XCTUnwrap(text.data(using: .isoLatin2))).base64EncodedString() + "?="
+        let json = #"{"id":"m","threadId":"t","payload":{"mimeType":"text/plain","headers":[{"name":"From","value":"a@example.com"},{"name":"Subject","value":"\#(subject)"},{"name":"Content-Type","value":"text/plain; charset=\"windows-1250\""}],"body":{"data":"\#(body)"}}}"#
+        let mapped = MailMapping.message(try JSONDecoder().decode(GoogleMailMessage.self, from: Data(json.utf8)), accountID: "owner@example.com", labels: [:])
+        XCTAssertEqual(mapped.subject, text)
+        XCTAssertEqual(mapped.plainText, text)
+    }
+
+    func testReplyToMalformedIdentifiersDropsThemInsteadOfFailing() throws {
+        let reply = OutgoingMessage(to: ["reader@example.com"], subject: "Re: Hello", inReplyTo: "bulk-sender-id@example.com",
+                                    references: ["<good@example.com>", "not an id", "<a@x>,<b@y>"])
+        let text = try XCTUnwrap(String(data: try MIMEComposer.compose(reply, from: "owner@example.com"), encoding: .utf8))
+        XCTAssertFalse(text.contains("In-Reply-To:"))
+        XCTAssertTrue(text.contains("References: <good@example.com>\r\n"))
+    }
+
+    func testRejectsHeaderInjectionInAddressAndFilename() throws {
         let messages = [
-            OutgoingMessage(to: ["reader@example.com"], subject: "Hello\r\nBcc: intruder@example.com"),
             OutgoingMessage(to: ["reader@example.com\nBcc: intruder@example.com"], subject: "Hello"),
             OutgoingMessage(to: ["reader@example.com"], subject: "Hello", attachments: [
                 OutgoingAttachment(name: "report\r\nContent-Type: text/html", mimeType: "text/plain", data: Data())

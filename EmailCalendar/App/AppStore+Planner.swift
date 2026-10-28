@@ -52,7 +52,10 @@ extension AppStore {
             if let thread {
                 try await plannerService.add(makeLink(thread, .todo(todo.id), title: todo.title, start: nil), accountID: account.id)
             }
-        } catch { reportError(error) }
+        } catch {
+            // Callers such as Move to To-do must not archive the email when its to-do wasn't saved.
+            reportError(error); await reloadPlanner(account.id); return nil
+        }
         await reloadPlanner(account.id)
         return todo
     }

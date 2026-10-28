@@ -131,6 +131,7 @@ struct MailComposerView: View {
     @State private var showsQuote = false
     @State private var editor = RichTextController()
     @State private var isClosing = false
+    @State private var confirmsDiscard = false
     @State private var errorText: String?
     @FocusState private var focus: Field?
     private enum Field { case to, cc, bcc, body }
@@ -242,7 +243,7 @@ struct MailComposerView: View {
                 }
                 .buttonStyle(PillButtonStyle(fill: canSend ? Theme.accent : Theme.accent.opacity(0.4)))
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!canSend || isSending || isSaving)
+                .disabled(!canSend || isSending)
                 Button { importsImages = true; showsImporter = true } label: { Label("Image", systemImage: "photo") }
                     .buttonStyle(PillButtonStyle(fill: .white.opacity(0.1)))
                     .disabled(draft.sendNeedsVerification)
@@ -255,6 +256,13 @@ struct MailComposerView: View {
                     .keyboardShortcut(.cancelAction)
                     .disabled(isSaving || isSending)
                     .help("Saves a draft and closes (Esc)")
+                Button { confirmsDiscard = true } label: { Label("Discard", systemImage: "trash") }
+                    .buttonStyle(PillButtonStyle(fill: .white.opacity(0.1)))
+                    .disabled(isSending || draft.sendNeedsVerification)
+                    .help("Close without keeping this email")
+                    .confirmationDialog("Discard this email?", isPresented: $confirmsDiscard) {
+                        Button("Discard", role: .destructive) { Task { await discard() } }
+                    } message: { Text(message.draftID == nil ? "What you wrote will be lost." : "Its draft is also removed from Gmail.") }
             }
             .padding(8)
             .background(Theme.actionBar, in: Capsule())
@@ -266,9 +274,10 @@ struct MailComposerView: View {
         .onAppear {
             focus = to.isEmpty ? .to : .body
             let accountID = store.account?.id
-            draft.configure(save: { outgoing in
+            draft.configure(save: { [composition] outgoing in
                 guard store.account?.id == accountID else { throw CancellationError() }
-                return try await store.saveDraft(outgoing)
+                do { return try await store.saveDraft(outgoing) }
+                catch { await store.checkpointDraft(composition); throw error }
             }, send: { outgoing in
                 guard store.account?.id == accountID else { throw CancellationError() }
                 try await store.send(outgoing)
@@ -345,14 +354,25 @@ struct MailComposerView: View {
         do {
             try await draft.flush()
             if close { onClose() }
+        } catch where close && ParkedDrafts.isConnectivityFailure(error) && !draft.sendNeedsVerification {
+            // Offline: keep the email on this Mac rather than trap you in the composer.
+            do { try await store.park(composition); onClose() }
+            catch { isClosing = false; errorText = "Draft could not be saved: \(error.localizedDescription)" }
         } catch {
             isClosing = false; errorText = "Draft could not be saved: \(error.localizedDescription)"
             if close { store.reportError(error) }
         }
     }
 
+    private func discard() async {
+        isClosing = true; errorText = nil
+        do { try await store.discard(composition); onClose() }
+        catch { isClosing = false; errorText = "Could not discard: \(error.localizedDescription)" }
+    }
+
     private func send() async {
-        guard canSend, !isSaving, !isSending else { return }
+        // A running autosave is fine: the session waits for it before sending.
+        guard canSend, !isSending else { return }
         errorText = nil
         do { try await draft.send(); onClose() }
         catch { errorText = error.localizedDescription; store.reportError(error) }

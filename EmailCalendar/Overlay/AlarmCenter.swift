@@ -22,6 +22,7 @@ final class AlarmCenter {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var takeover: AlarmTakeover?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var keepAwake: NSObjectProtocol?
     private let defaultsKey: String
 
     init(defaultsKey: String = "alarms.pending") {
@@ -93,6 +94,7 @@ final class AlarmCenter {
     }
 
     private func updateTimer() {
+        updateKeepAwake()
         if alarms.isEmpty || ringing != nil {
             timer?.invalidate(); timer = nil
         } else if timer == nil {
@@ -102,6 +104,17 @@ final class AlarmCenter {
             timer.tolerance = 0.2
             RunLoop.main.add(timer, forMode: .common)
             self.timer = timer
+        }
+    }
+
+    /// A Mac that idle-sleeps would ring late, so it stays awake while an alarm is near (a closed lid still sleeps it).
+    private func updateKeepAwake() {
+        let near = ringing != nil || alarms.first.map { $0.fireAt.timeIntervalSinceNow < 4 * 3_600 } == true
+        if near, keepAwake == nil {
+            keepAwake = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "An alarm is set")
+        } else if !near, let activity = keepAwake {
+            ProcessInfo.processInfo.endActivity(activity)
+            keepAwake = nil
         }
     }
 
@@ -193,15 +206,19 @@ private final class AlarmWindow: NSPanel {
     var onStop: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+    /// Typing that was already under way when the alarm appeared must not snooze or stop it unseen.
+    private let shownAt = Date()
+    private var acceptsKeys: Bool { Date().timeIntervalSince(shownAt) > 1.2 }
 
     override func keyDown(with event: NSEvent) {
+        guard acceptsKeys, !event.isARepeat else { return }
         switch (event.keyCode, event.charactersIgnoringModifiers?.lowercased()) {
         case (_, "s"), (49, _): onSnooze?()        // S or Space
         case (53, _), (36, _), (76, _): onStop?()  // Escape, Return, Enter
         default: break
         }
     }
-    override func cancelOperation(_ sender: Any?) { onStop?() }
+    override func cancelOperation(_ sender: Any?) { if acceptsKeys { onStop?() } }
 }
 
 /// Full-screen and impossible to miss, without strobing: the red breathes about once a second.

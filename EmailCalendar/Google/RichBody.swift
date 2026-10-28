@@ -244,6 +244,8 @@ extension OutgoingMessage {
             var index = 0, kept = ""
             for character in parsed.body {
                 guard character == RichBody.imageMarker else { kept.append(character); continue }
+                // A literal U+FFFC in the HTML has no image behind it.
+                guard index < parsed.imageIDs.count else { continue }
                 let id = parsed.imageIDs[index]; index += 1
                 if let image = OutgoingAttachment.inlineImage(id, of: draft, data: data) { kept.append(character); images.append(image); used.insert(id) }
             }

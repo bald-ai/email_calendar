@@ -10,6 +10,8 @@ struct CalendarEventEditor: View {
     @State private var failure: String?
     @State private var asksScope = false
     @State private var asksDelete = false
+    /// A reply to a recurring invitation waiting for "this event" or "all events".
+    @State private var seriesResponse: AttendanceStatus?
     @State private var customRecurrence = ""
     @State private var repeatChoice: RepeatChoice
     @State private var original: CalendarEvent
@@ -54,7 +56,7 @@ struct CalendarEventEditor: View {
     }
 
     private var canEdit: Bool { store.calendars.first { $0.id == event.calendarID }?.canEdit == true }
-    private var ownAttendance: EventAttendee? { event.attendees.first(where: \.isSelf) }
+    private var ownAttendance: EventAttendee? { event.attendees.first { $0.isSelf && !$0.isOrganizer } }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -124,10 +126,7 @@ struct CalendarEventEditor: View {
                                     let selected = ownAttendance?.response == response
                                     let fill = response == .accepted ? Theme.yes : (response == .declined ? Theme.no : Theme.secondary)
                                     Button(response == .accepted ? "Yes" : (response == .declined ? "No" : "Maybe")) {
-                                        Task {
-                                            if await store.respondToEvent(event, response: response) { close() }
-                                            else { failure = store.errorMessage ?? "Could not update your response." }
-                                        }
+                                        if event.recurringEventID != nil { seriesResponse = response } else { respond(response, scope: .thisEvent) }
                                     }.buttonStyle(PillButtonStyle(fill: selected ? fill : fill.opacity(0.25)))
                                 }
                             }
@@ -151,12 +150,18 @@ struct CalendarEventEditor: View {
                         if original.isRecurring { asksScope = true } else { save(.thisEvent) }
                     }
                     .buttonStyle(PillButtonStyle(fill: Theme.accent)).keyboardShortcut(.defaultAction)
-                    .disabled(isSaving || event.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || event.end <= event.start)
+                    .disabled(isSaving || event.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || event.end < event.start)
                 }
             }.padding(18).disabled(isSaving)
         }
         .frame(width: 490, height: 640)
         .background(Theme.card)
+        .confirmationDialog("Reply to recurring event", isPresented: Binding(get: { seriesResponse != nil }, set: { if !$0 { seriesResponse = nil } }),
+                            titleVisibility: .visible, presenting: seriesResponse) { response in
+            Button("This event") { respond(response, scope: .thisEvent) }
+            Button("All events") { respond(response, scope: .allEvents) }
+            Button("Cancel", role: .cancel) {}
+        }
         .confirmationDialog("Edit recurring event", isPresented: $asksScope, titleVisibility: .visible) {
             Button("This event") { save(.thisEvent) }
             Button("All events") { save(.allEvents) }
@@ -228,11 +233,19 @@ struct CalendarEventEditor: View {
             if deleted { close() } else { failure = store.errorMessage ?? "Could not delete this event." }
         }
     }
+
+    private func respond(_ response: AttendanceStatus, scope: EventEditScope) {
+        Task {
+            if await store.respondToEvent(event, response: response, scope: scope) { close() }
+            else { failure = store.errorMessage ?? "Could not update your response." }
+        }
+    }
 }
 
 struct CalendarEventDetail: View {
     @Environment(AppStore.self) private var store
     let event: CalendarEvent
+    @State private var seriesResponse: AttendanceStatus?
     /// Edits right here, in a panel, without leaving for the main window.
     let onEdit: () -> Void
     let onOpen: () -> Void
@@ -250,11 +263,18 @@ struct CalendarEventDetail: View {
             if !event.notes.isEmpty {
                 ScrollView { Text(event.notes).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 110)
             }
-            if event.attendees.contains(where: \.isSelf) {
+            // Not on your own meetings: declining one would email every guest.
+            if event.attendees.contains(where: { $0.isSelf && !$0.isOrganizer }) {
                 HStack {
-                    Button("Accept") { Task { await store.respondToEvent(event, response: .accepted) } }
-                    Button("Decline") { Task { await store.respondToEvent(event, response: .declined) } }
+                    Button("Accept") { respond(.accepted) }
+                    Button("Decline") { respond(.declined) }
                 }.buttonStyle(.bordered).controlSize(.small)
+                .confirmationDialog("Reply to recurring event", isPresented: Binding(get: { seriesResponse != nil }, set: { if !$0 { seriesResponse = nil } }),
+                                    titleVisibility: .visible, presenting: seriesResponse) { response in
+                    Button("This event") { Task { await store.respondToEvent(event, response: response) } }
+                    Button("All events") { Task { await store.respondToEvent(event, response: response, scope: .allEvents) } }
+                    Button("Cancel", role: .cancel) {}
+                }
             }
             HStack {
                 Button { onOpen() } label: { Label("Open in app", systemImage: "arrow.up.right.square") }
@@ -264,6 +284,11 @@ struct CalendarEventDetail: View {
                     .buttonStyle(PillButtonStyle(fill: Theme.accent)).keyboardShortcut(.defaultAction)
             }
         }.padding(16).frame(width: 300)
+    }
+
+    private func respond(_ response: AttendanceStatus) {
+        if event.recurringEventID != nil { seriesResponse = response }
+        else { Task { await store.respondToEvent(event, response: response) } }
     }
 
     static func videoLink(for event: CalendarEvent) -> URL? {

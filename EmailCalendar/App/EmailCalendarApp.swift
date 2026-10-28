@@ -14,6 +14,11 @@ struct EmailCalendarApp: App {
         _overlay = State(initialValue: panel)
         state.showOverlay = { [weak panel] in panel?.toggle() }
         appDelegate.store = state
+        // Also at launch, not only when the window appears: a login launch may restore no window.
+        appDelegate.onLaunch = { [weak panel] in
+            panel?.installHotkey()
+            Task { await state.start() }
+        }
     }
 
     var body: some Scene {
@@ -67,7 +72,23 @@ struct EmailCalendarApp: App {
 @MainActor
 final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
     weak var store: AppStore?
+    var onLaunch: (() -> Void)?
     private var preparing = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        onLaunch?()
+        // After travel, days and hours must follow the new zone without a relaunch.
+        NotificationCenter.default.addObserver(forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                NSTimeZone.resetSystemTimeZone()
+                CalendarGeometry.timeZoneDidChange()
+                Task {
+                    await self?.store?.reloadCalendarCache()
+                    await self?.store?.refresh()
+                }
+            }
+        }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let store else { return .terminateNow }

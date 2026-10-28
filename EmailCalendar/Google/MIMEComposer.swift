@@ -24,7 +24,11 @@ public enum MIMEComposer {
     }
 
     public static func compose(_ outgoing: OutgoingMessage, from: String) throws -> Data {
-        try validateHeader(outgoing.subject, field: "subject")
+        // "Re: " + an original subject can carry tabs or folded newlines; flatten them rather than refuse to send.
+        var outgoing = outgoing
+        outgoing.subject = String(String.UnicodeScalarView(outgoing.subject.unicodeScalars.map {
+            $0.value < 32 || $0.value == 127 ? " " : $0
+        }))
         let fromAddress = try address(from)
         let to = try outgoing.to.map(address)
         let cc = try outgoing.cc.map(address)
@@ -44,13 +48,14 @@ public enum MIMEComposer {
         // Gmail strips this header from the delivered message after routing the Bcc recipients.
         if !bcc.isEmpty { headers.append(foldAddressList("Bcc", bcc)) }
         headers.append("Subject: \(encodeHeader(outgoing.subject))")
-        if let reply = outgoing.inReplyTo {
-            try validateMessageID(reply)
+        // Malformed identifiers from the original mail are dropped: they only affect threading, never block a reply.
+        let isMessageID = { (value: String) in (try? validateMessageID(value)) != nil }
+        if let reply = outgoing.inReplyTo?.trimmingCharacters(in: .whitespaces), isMessageID(reply) {
             headers.append("In-Reply-To: \(reply)")
         }
-        if !outgoing.references.isEmpty {
-            try outgoing.references.forEach(validateMessageID)
-            headers.append("References: \(outgoing.references.joined(separator: "\r\n "))")
+        let references = outgoing.references.filter(isMessageID)
+        if !references.isEmpty {
+            headers.append("References: \(references.joined(separator: "\r\n "))")
         }
         headers.append("MIME-Version: 1.0")
         var content = headers.joined(separator: "\r\n") + "\r\n"

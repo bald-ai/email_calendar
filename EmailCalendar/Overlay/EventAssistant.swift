@@ -114,7 +114,10 @@ final class EventAssistant {
                     failure = error
                 }
             }
-            if let failure, !Task.isCancelled { message = failure.localizedDescription }
+            // A cancelled run (Start over, close) often fails with a URL error rather than CancellationError;
+            // it must not touch the state of a newer run.
+            guard !Task.isCancelled else { return }
+            if let failure { message = failure.localizedDescription }
             isWorking = false
         }
     }

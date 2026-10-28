@@ -75,7 +75,7 @@ struct AppShellView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "magnifyingglass").foregroundStyle(Theme.secondary)
                         TextField("Search mail", text: $searchText).textFieldStyle(.plain).focused($searchFocused).frame(width: 220)
-                            .onSubmit { Task { await store.search(searchText) } }
+                            .onSubmit { searchFocused = false; Task { await store.search(searchText) } }
                             .onKeyPress(.escape) { endSearch(); return .handled }
                     }
                     .padding(.horizontal, 10).padding(.vertical, 6)
@@ -215,6 +215,9 @@ struct AppShellView: View {
         if event.keyCode == 53 {
             if showsMenu { showsMenu = false; return true }
             if store.navigation == .calendar { store.navigation = .imbox; return true }
+            // On the results list itself; anything on top of it (thread, picked rows, linking) closes first.
+            if !store.searchQuery.isEmpty, store.openThreadID == nil, !store.isComposing, !store.poweringThrough,
+               store.selection.isEmpty, store.linkingThreadID == nil { endSearch(); return true }
             return false
         }
         if event.charactersIgnoringModifiers?.lowercased() == "h" { showsMenu.toggle(); return true }
@@ -236,6 +239,11 @@ struct JumpMenu: View {
         var symbol: String
         var action: () -> Void
     }
+
+    /// The number row without Shift on Czech (+ěščřž) and French (&é"'(-) keyboards, so 1–6 work there too.
+    private static let unshiftedDigits: [String: Int] = ["+": 1, "ě": 2, "š": 3, "č": 4, "ř": 5, "ž": 6,
+                                                         "&": 1, "é": 2, "\"": 3, "'": 4, "(": 5, "-": 6]
+    private static let numberRow = CharacterSet.decimalDigits.union(CharacterSet(charactersIn: unshiftedDigits.keys.joined()))
 
     private var tiles: [(Mailbox, Int)] {
         [(.imbox, 1), (.calendar, 2), (.screener, 3), (.setAside, 4), (.bubbleUp, 5), (.drafts, 6)]
@@ -265,8 +273,8 @@ struct JumpMenu: View {
                     .textFieldStyle(.plain).foregroundStyle(.white).focused($focused)
                     .onSubmit(submit)
                     .onKeyPress(.escape) { isPresented = false; return .handled }
-                    .onKeyPress(characters: .decimalDigits) { press in
-                        guard filter.isEmpty, let number = Int(press.characters),
+                    .onKeyPress(characters: Self.numberRow) { press in
+                        guard filter.isEmpty, let number = Int(press.characters) ?? Self.unshiftedDigits[press.characters],
                               let tile = tiles.first(where: { $0.1 == number }) else { return .ignored }
                         go(tile.0); return .handled
                     }

@@ -25,6 +25,8 @@ final class AppStore {
     var isApplyingBatch = false
     /// The thread shown as a full page; nil shows the mailbox list.
     var openThreadID: String?
+    /// The open thread was new when opened: the Imbox keeps it with new mail, so j and focus after an action stay there.
+    var openedUnreadID: String?
     /// "Power Through New": new Imbox mail as one scrolling stack of cards, instead of the list.
     var poweringThrough = false
     /// Set to ask the mail view to open a blank composer (from menus outside it).
@@ -58,6 +60,10 @@ final class AppStore {
     @ObservationIgnored private var confirmationTask: Task<Void, Never>?
     /// Verified Gmail "Send mail as" addresses, the account's own first; the composer offers them as From.
     var sendAddresses: [String] = []
+    /// The banner text a failed refresh showed, cleared by the next successful one.
+    @ObservationIgnored private var refreshError: String?
+    /// Emails closed while Gmail couldn't be reached. Each refresh tries to save them to Gmail.
+    @ObservationIgnored private let parkedDrafts: ParkedDrafts?
     @ObservationIgnored private var sendAddressesCheckedAt: Date?
     /// To-dos and the links between email threads and events or to-dos.
     var planner = PlannerSnapshot()
@@ -160,8 +166,9 @@ final class AppStore {
             mail = MailService(api: api, store: local)
             calendarService = CalendarService(api: api, store: local)
             plannerService = PlannerService(store: local)
+            parkedDrafts = ParkedDrafts(store: local)
         } catch {
-            database = nil; mail = nil; calendarService = nil; plannerService = nil
+            database = nil; mail = nil; calendarService = nil; plannerService = nil; parkedDrafts = nil
             errorMessage = error.localizedDescription
         }
     }
@@ -216,6 +223,7 @@ final class AppStore {
         }
         await loadCache()
         await restoreDraft()
+        await restoreParkedDrafts()
         await configureLoginItem()
         if bubbleNotifications && account != nil { await requestNotificationPermission() }
         if let account, let mail {
@@ -242,9 +250,15 @@ final class AppStore {
             }
         } catch { isSigningIn = false; reportError(error); return }
         isSigningIn = false
+        // A composer left open by an expired session belongs to the old account: keep it there, not here.
+        if let composition, let owner = composition.accountID, owner != account?.id {
+            await checkpointDraft(composition)
+            composition.session.cancel(); self.composition = nil
+        }
         sendAddresses = []; sendAddressesCheckedAt = nil
         await loadCache()
         await restoreDraft()
+        await restoreParkedDrafts()
         if bubbleNotifications { await requestNotificationPermission() }
         await refresh()
     }
@@ -253,8 +267,16 @@ final class AppStore {
         guard !isSigningIn, !isDemoMode, !isQuitting else { return }
         isSigningIn = true
         defer { isSigningIn = false }
+        // Save the open email to Gmail, or keep a local copy that reopens at the next sign-in, before it closes.
+        if let composition, let database, let accountID = composition.accountID ?? account?.id {
+            try? await DraftTermination.preserve(composition.session, title: composition.title, accountID: accountID, store: database)
+        }
+        // As at quit, emails counting down are sent (or undone) first instead of silently dropped.
+        await finishPendingSends()
+        if let accountID = account?.id { await saveParkedDrafts(accountID: accountID) }
+        parkedDrafts?.drop()
         // Stop new UI and polling work before draining operations tied to these credentials.
-        composition?.session.cancel(); composition = nil
+        composition?.session.cancel(); composition = nil; openedUnreadID = nil
         account = nil; threads = []; cachedThreads = []; senderRules = []; remoteImageSenders = []
         calendars = []; events = []; selectedThreadID = nil; selectedEventID = nil; openThreadID = nil; poweringThrough = false
         planner = PlannerSnapshot(); linkingThreadID = nil; plannerReveal = nil
@@ -279,6 +301,7 @@ final class AppStore {
         guard !isRefreshing, let account, let mail, let calendarService else { return }
         isRefreshing = true
         defer { isRefreshing = false }
+        var failure: String?
         // Independent services let the calendar appear while sent-history seeding is still running.
         let progress: @Sendable (MailSnapshot) async -> Void = { [weak self] snapshot in
             await self?.publishMailProgress(snapshot, accountID: account.id)
@@ -288,7 +311,7 @@ final class AppStore {
         do {
             try await calendarTask.value
             if self.account?.id == account.id { try await loadCalendarCache(accountID: account.id) }
-        } catch { reportError(error) }
+        } catch { reportRefreshError(error, failure: &failure) }
         do {
             let snapshot = try await mailTask.value
             guard self.account?.id == account.id else { return }
@@ -299,7 +322,11 @@ final class AppStore {
                 await notifyBubbles(surfaced)
             }
             lastSyncedAt = .now
-        } catch { reportError(error) }
+        } catch { reportRefreshError(error, failure: &failure) }
+        // An "offline" banner from an earlier refresh goes away once syncing works again.
+        if failure == nil, let shown = refreshError, errorMessage == shown { errorMessage = nil }
+        refreshError = failure
+        await saveParkedDrafts(accountID: account.id)
         await refreshSendAddresses(account: account)
     }
 
@@ -453,6 +480,7 @@ final class AppStore {
     func open(_ thread: MailThread) {
         selectedThreadID = thread.id
         openThreadID = thread.id
+        openedUnreadID = thread.unread ? thread.id : nil
         Task {
             if let message = thread.messages.first(where: \.needsBodyHydration) {
                 do { _ = try await fullMessage(message) } catch { reportError(error) }
@@ -464,6 +492,7 @@ final class AppStore {
     /// Back to the page under the thread: the mailbox list, or the Power Through stack.
     func closeThread() {
         openThreadID = nil
+        openedUnreadID = nil
     }
 
     /// New Imbox mail, oldest first, so Power Through works through it in arrival order.
@@ -630,6 +659,44 @@ final class AppStore {
             open(thread)
         } catch { reportError(error) }
     }
+    /// A local copy of the open email, written while Gmail can't save it, so a crash or power loss doesn't lose it.
+    func checkpointDraft(_ composition: MailComposition) async {
+        guard parkedDrafts?.contains(composition.session) != true, let database, let accountID = composition.accountID ?? account?.id,
+              let buffer = composition.session.recoveryBuffer else { return }
+        try? await database.setMetadata(DraftRecovery(title: composition.title, buffer: buffer),
+                                        key: DraftRecovery.metadataKey, accountID: accountID)
+    }
+
+    /// Save & close while Gmail can't be reached: the email is kept on this Mac and the composer closes.
+    func park(_ composition: MailComposition) async throws {
+        guard let database, let parkedDrafts, let accountID = composition.accountID ?? account?.id else { throw AppError.draftStorageUnavailable }
+        try await parkedDrafts.park(composition.session, id: composition.id.uuidString, title: composition.title,
+                                    accountID: accountID, save: parkedSaver(accountID: accountID))
+        // The parked record replaces its crash checkpoint.
+        try? await database.removeMetadata(key: DraftRecovery.metadataKey, accountID: accountID)
+        if self.composition?.id == composition.id { self.composition = nil }
+        errorMessage = "Gmail can't be reached, so “\(composition.title)” is kept on this Mac. It goes to Drafts when you're back online."
+    }
+
+    private func parkedSaver(accountID: String) -> ParkedDrafts.Saver {
+        { [weak self] outgoing in
+            guard let self, self.account?.id == accountID else { throw CancellationError() }
+            return try await self.saveDraft(outgoing)
+        }
+    }
+
+    private func saveParkedDrafts(accountID: String) async {
+        guard let refused = await parkedDrafts?.saveAll(accountID: accountID).first else { return }
+        errorMessage = "“\(refused.title)” is kept on this Mac, but Gmail won't save it: \(refused.error.localizedDescription)"
+    }
+
+    /// After a relaunch or sign-in, emails kept on this Mac go back to waiting for Gmail.
+    private func restoreParkedDrafts() async {
+        guard let account, let parkedDrafts else { return }
+        do { try await parkedDrafts.restore(accountID: account.id, save: parkedSaver(accountID: account.id)) }
+        catch { reportError(error) }
+    }
+
     func saveDraft(_ outgoing: OutgoingMessage) async throws -> OutgoingMessage {
         guard let account, let mail else { throw AppError.signInRequired }
         let result = try await mail.saveDraft(outgoing, account: account)
@@ -640,6 +707,18 @@ final class AppStore {
         catch { errorMessage = "Draft saved to Gmail, but the local view could not refresh: \(error.localizedDescription)" }
         return result
     }
+    /// Closes the composer without keeping the email: its Gmail draft and local copy are removed.
+    func discard(_ composition: MailComposition) async throws {
+        guard let account, let mail else { throw AppError.signInRequired }
+        let outgoing = await composition.session.stopSaving()
+        do { try await mail.discardDraft(outgoing, account: account) }
+        catch { composition.session.resume(); throw error }
+        composition.session.cancel()
+        try? await database?.removeMetadata(key: DraftRecovery.metadataKey, accountID: account.id)
+        if self.composition?.id == composition.id { self.composition = nil }
+        try? await loadMailCache(accountID: account.id)
+    }
+
     func send(_ outgoing: OutgoingMessage) async throws {
         guard let account, let mail else { throw AppError.signInRequired }
         // Keep the composer buffer until the email is safely queued: a crash while saving reopens it.
@@ -686,7 +765,12 @@ final class AppStore {
             guard undone != nil else { errorMessage = "Too late to undo: this email is already being sent."; return }
             // While quitting, the email just stays in Drafts.
             if !isQuitting { await openDraft(draftID: draftID) }
-        } catch { reportError(error) }
+        } catch {
+            reportError(error)
+            // Its timer is gone: hold it for review rather than leave it counting down forever.
+            try? await mail.holdPendingSend(draftID: draftID, reason: "Undo failed. Review before sending.", account: account)
+            await reloadPendingSends(accountID: account.id)
+        }
     }
     func sendPendingNow(_ draftID: String) async {
         guard let account else { return }
@@ -858,9 +942,13 @@ final class AppStore {
         catch { reportError(error); return false }
     }
     @discardableResult
-    func respondToEvent(_ event: CalendarEvent, response: AttendanceStatus) async -> Bool {
+    func respondToEvent(_ event: CalendarEvent, response: AttendanceStatus, scope: EventEditScope = .thisEvent) async -> Bool {
         guard let calendarService, account?.id == event.accountID else { return false }
-        do { _ = try await calendarService.respond(to: event, status: response); await reloadCalendarAfterWrite(accountID: event.accountID); return true }
+        do {
+            _ = try await calendarService.respond(to: event, status: response, scope: scope)
+            if scope == .allEvents { try? await calendarService.sync(accountID: event.accountID) }
+            await reloadCalendarAfterWrite(accountID: event.accountID); return true
+        }
         catch let error as CalendarWriteCommittedError { reportError(error); return true }
         catch { reportError(error); return false }
     }
@@ -889,6 +977,16 @@ final class AppStore {
         openWindow?()
         NSApp.activate(ignoringOtherApps: true)
     }
+    /// Offline, every poll fails the same way: once dismissed, that banner stays away until something else goes wrong.
+    private func reportRefreshError(_ error: any Error, failure: inout String?) {
+        guard !(error is CancellationError) else { return }
+        let text = error.localizedDescription, shown = errorMessage
+        let dismissed = text == refreshError && shown != text
+        failure = text
+        reportError(error)
+        if dismissed, account != nil { errorMessage = shown }
+    }
+
     func reportError(_ error: any Error) {
         if error is CancellationError { return }
         errorMessage = error.localizedDescription
@@ -987,6 +1085,12 @@ final class AppStore {
             }
         }
     }
+    /// Re-reads cached events, so they are placed again after the time zone changed, even offline.
+    func reloadCalendarCache() async {
+        guard let account else { return }
+        do { try await loadCalendarCache(accountID: account.id) } catch { reportError(error) }
+    }
+
     private func loadCalendarCache(accountID: String) async throws {
         guard account?.id == accountID else { return }
         if let calendarService {

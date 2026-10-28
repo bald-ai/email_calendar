@@ -63,9 +63,10 @@ public final class MockGoogleBackend: @unchecked Sendable {
             let query = Dictionary((URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
                 .compactMap { item in item.value.map { (item.name, $0) } }, uniquingKeysWith: { first, _ in first })
             let multi = (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
-            let body = request.httpBody ?? Data()
+            var body = request.httpBody ?? Data()
             let path = url.path
             do {
+                if query["uploadType"] == "multipart" { body = try Self.jsonBody(fromUpload: body) }
                 if let range = path.range(of: "/gmail/v1/users/me/") {
                     let parts = path[range.upperBound...].split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }
                     return try gmail(method: method, parts: parts, query: query, labelIDs: multi.filter { $0.name == "labelIds" }.compactMap(\.value), body: body)
@@ -81,6 +82,25 @@ public final class MockGoogleBackend: @unchecked Sendable {
                 return self.error(400, error.localizedDescription)
             }
         }
+    }
+
+    /// The upload endpoint's multipart body (JSON metadata, then the message) as the JSON body of the regular endpoint.
+    private static func jsonBody(fromUpload body: Data) throws -> Data {
+        let text = String(decoding: body, as: UTF8.self)
+        guard let delimiter = text.components(separatedBy: "\r\n").first, delimiter.hasPrefix("--") else { throw MockFailure(400, "Bad multipart upload") }
+        let contents = text.components(separatedBy: delimiter).dropFirst().compactMap { section -> String? in
+            guard let split = section.range(of: "\r\n\r\n") else { return nil }
+            let content = section[split.upperBound...]
+            // "\r\n" is a single Character in Swift.
+            return String(content.hasSuffix("\r\n") ? content.dropLast() : content)
+        }
+        guard contents.count == 2, var metadata = try JSONSerialization.jsonObject(with: Data(contents[0].utf8)) as? [String: Any] else {
+            throw MockFailure(400, "Bad multipart upload")
+        }
+        let raw = Data(contents[1].utf8).base64URL
+        if var message = metadata["message"] as? [String: Any] { message["raw"] = raw; metadata["message"] = message }
+        else { metadata["raw"] = raw }
+        return try JSONSerialization.data(withJSONObject: metadata)
     }
 
     // MARK: Gmail
@@ -181,6 +201,11 @@ public final class MockGoogleBackend: @unchecked Sendable {
             let message = try storeRaw(raw.raw, threadID: threadID, labels: ["DRAFT"])
             state.drafts[parts[1]] = message.id
             return saved(GoogleDraft(id: parts[1], message: messageJSON(message)))
+        case ("DELETE", "drafts", 2):
+            guard let messageID = state.drafts.removeValue(forKey: parts[1]) else { throw MockFailure(404, "Requested entity was not found.") }
+            removeMessage(messageID)
+            persist()
+            return (204, Data())
         case ("POST", "drafts", 2) where parts[1] == "send":
             let id = try decode(IDBody.self, body).id
             guard let messageID = state.drafts.removeValue(forKey: id), var message = state.messages[messageID] else {

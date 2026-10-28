@@ -448,13 +448,18 @@ public struct EventExtractor: Sendable {
                var end = endCalendar.date(from: DateComponents(year: endDay.year, month: endDay.month, day: endDay.day,
                                                             hour: endTime.hour, minute: endTime.minute)) {
                 if end <= start {
-                    guard raw.end_date == nil else { return nil }
+                    // Models often repeat the start date as end_date; only a different end day is a contradiction.
+                    guard endDay == day else { return nil }
                     end = calendar.date(byAdding: .day, value: 1, to: end)!
-                    if raw.end_date == nil { info.append("Ends after midnight, on the next day.") }
+                    info.append("Ends after midnight, on the next day.")
                 }
                 event.end = end
             } else {
                 event.end = start.addingTimeInterval(3600)
+                // "From 9:00 on the 22nd to the 24th" must not quietly become a one-hour event.
+                if let endDay = raw.end_date.flatMap(components), endDay != day {
+                    warnings.append("Runs until \(raw.end_date!), but no end time was given, so it's set to one hour. Check the end.")
+                }
             }
             event.localZoneText = Self.zoneText(local, at: start)
             let startDiffers = startZone.secondsFromGMT(for: start) != local.secondsFromGMT(for: start)

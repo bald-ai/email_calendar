@@ -49,7 +49,7 @@ for scope in ["project", "target"]:
             "SWIFT_VERSION": "6.0", "SWIFT_STRICT_CONCURRENCY": "complete"
         }
         if scope == "target":
-            settings.update({"CODE_SIGN_STYLE": "Automatic", "COMBINE_HIDPI_IMAGES": "YES", "LD_RUNPATH_SEARCH_PATHS": "$(inherited) @executable_path/../Frameworks"})
+            settings.update({"COMBINE_HIDPI_IMAGES": "YES", "LD_RUNPATH_SEARCH_PATHS": "$(inherited) @executable_path/../Frameworks"})
         if config == "Debug":
             settings.update({"SWIFT_OPTIMIZATION_LEVEL": "-Onone", "ONLY_ACTIVE_ARCH": "YES", "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG $(inherited)", "DEBUG_INFORMATION_FORMAT": "dwarf"})
         else:

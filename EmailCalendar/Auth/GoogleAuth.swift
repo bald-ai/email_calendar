@@ -183,8 +183,9 @@ public final class GoogleAuth: NSObject, ObservableObject, GoogleTokenProvider, 
             updated.accessToken = response.access_token
             updated.expiresAt = Date().addingTimeInterval(response.expires_in)
             updated.refreshToken = response.refresh_token ?? refreshToken
-            try self.keychain.write(JSONEncoder().encode(updated))
+            // A failed Keychain write (denied prompt, locked keychain) must not discard a valid token.
             self.credentials = updated
+            try? self.keychain.write(JSONEncoder().encode(updated))
             return updated.accessToken
         }
         refreshTask = task

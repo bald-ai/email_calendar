@@ -80,8 +80,9 @@ actor CalendarService {
             let snapshot = try await store.snapshot(GoogleEvent.self, collection: eventsCollection(calendar.id), accountID: accountID,
                                                     ifChangedSince: cached?.zone == zone ? cached?.revision : nil)
             if let snapshot {
-                let events = try snapshot.values.filter { $0.status != "cancelled" }.map {
-                    try Self.event(from: $0, calendarID: calendar.id, accountID: accountID)
+                // One event Google sent with a broken date must not hide the rest of the calendar.
+                let events = snapshot.values.filter { $0.status != "cancelled" }.compactMap {
+                    try? Self.event(from: $0, calendarID: calendar.id, accountID: accountID)
                 }
                 parsedEvents[key] = ParsedEvents(revision: snapshot.revision, zone: zone, events: events)
                 result += events
@@ -278,12 +279,16 @@ actor CalendarService {
         }
     }
 
+    /// With `.allEvents` the reply goes to the whole series; its occurrences update at the next sync.
     @discardableResult
-    func respond(to event: CalendarEvent, status: AttendanceStatus) async throws -> CalendarEvent {
+    func respond(to event: CalendarEvent, status: AttendanceStatus, scope: EventEditScope = .thisEvent) async throws -> CalendarEvent {
         try await serialized(accountID: event.accountID) {
             let email = event.attendees.first(where: \.isSelf)?.email ?? event.accountID
-            let raw = try await self.api.respondToInvitation(calendarID: event.calendarID, eventID: event.id,
+            let series = scope == .allEvents ? event.recurringEventID : nil
+            let raw = try await self.api.respondToInvitation(calendarID: event.calendarID, eventID: series ?? event.id,
                                                             email: email, responseStatus: status.rawValue)
+            // The cache holds occurrences, not series, so a series reply is picked up by syncing.
+            if series != nil { return event }
             do {
                 try await self.save(raw, calendarID: event.calendarID, accountID: event.accountID)
                 return try Self.event(from: raw, calendarID: event.calendarID, accountID: event.accountID)
@@ -394,7 +399,8 @@ actor CalendarService {
                     removals.formUnion(existing.filter { $0.recurringEventId == raw.id }.map(\.id))
                 }
             } else {
-                let event = try Self.event(from: raw, calendarID: calendarID, accountID: accountID)
+                // Skip an event with a broken date instead of failing the sync and never saving its token.
+                guard let event = try? Self.event(from: raw, calendarID: calendarID, accountID: accountID) else { continue }
                 if !replacing, !resetSeries.contains(raw.recurringEventId ?? ""), let old = try await store.load(GoogleEvent.self, id: raw.id, collection: eventsCollection(calendarID), accountID: accountID), old == raw { continue }
                 records.append(.init(id: raw.id, value: raw, sortDate: event.start))
             }
@@ -426,7 +432,7 @@ actor CalendarService {
         }
         var rows = Dictionary(outside.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         for raw in fetched.items where raw.status != "cancelled" {
-            _ = try Self.event(from: raw, calendarID: calendarID, accountID: accountID)
+            guard (try? Self.event(from: raw, calendarID: calendarID, accountID: accountID)) != nil else { continue }
             rows[raw.id] = raw
         }
         try await store.save(rows.values.map { LocalStore.Record(id: $0.id, value: $0, sortDate: Self.date($0.start)) },
@@ -473,7 +479,8 @@ actor CalendarService {
 
     private static func validate(_ event: CalendarEvent) throws {
         guard !event.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CalendarError.missingTitle }
-        guard event.end > event.start else { throw CalendarError.invalidDates }
+        // Google allows timed events that end when they start (a "0 mins" reminder).
+        guard event.end >= event.start else { throw CalendarError.invalidDates }
         if event.isAllDay, Calendar.current.startOfDay(for: event.end) <= Calendar.current.startOfDay(for: event.start) {
             throw CalendarError.invalidDates
         }
@@ -484,7 +491,7 @@ actor CalendarService {
     }
 
     static func event(from raw: GoogleEvent, calendarID: String, accountID: String) throws -> CalendarEvent {
-        guard let start = date(raw.start), let end = date(raw.end), end > start else {
+        guard let start = date(raw.start), let end = date(raw.end), end >= start else {
             throw CalendarError.invalidGoogleDate(raw.id)
         }
         let attendees = (raw.attendees ?? []).compactMap { value -> EventAttendee? in

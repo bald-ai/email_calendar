@@ -11,12 +11,15 @@ public enum GoogleAPIError: Error, LocalizedError, Sendable {
     case http(status: Int, message: String)
     case invalidResponse
     case invalidURL
+    /// No access token, so the request never reached Google.
+    case authorization(String)
 
     public var errorDescription: String? {
         switch self {
         case let .http(status, message): "Google returned \(status): \(message)"
         case .invalidResponse: "Google returned an invalid response."
         case .invalidURL: "The Google request URL is invalid."
+        case let .authorization(message): message
         }
     }
 
@@ -117,23 +120,40 @@ public actor GoogleAPI {
         try await get(GoogleDraft.self, base: .gmail, path: ["drafts", id], query: [URLQueryItem(name: "format", value: "full")])
     }
 
+    /// Larger messages go through Gmail's upload endpoint (up to 35 MB) instead of base64 inside JSON.
+    static let uploadThreshold = 3 * 1_024 * 1_024
+
     public func createDraft(raw: Data, threadID: String? = nil) async throws -> GoogleDraft {
-        try await mutate(GoogleDraft.self, base: .gmail, path: ["drafts"], method: "POST",
-                         body: DraftMutation(message: RawMessage(raw: raw.base64URL, threadId: threadID)))
+        if raw.count > Self.uploadThreshold {
+            return try await upload(GoogleDraft.self, path: ["drafts"], method: "POST", metadata: UploadDraft(message: UploadMessage(threadId: threadID)), raw: raw)
+        }
+        return try await mutate(GoogleDraft.self, base: .gmail, path: ["drafts"], method: "POST",
+                                body: DraftMutation(message: RawMessage(raw: raw.base64URL, threadId: threadID)))
     }
 
     public func updateDraft(id: String, raw: Data, threadID: String? = nil) async throws -> GoogleDraft {
-        try await mutate(GoogleDraft.self, base: .gmail, path: ["drafts", id], method: "PUT",
-                         body: DraftMutation(message: RawMessage(raw: raw.base64URL, threadId: threadID)))
+        if raw.count > Self.uploadThreshold {
+            return try await upload(GoogleDraft.self, path: ["drafts", id], method: "PUT", metadata: UploadDraft(message: UploadMessage(threadId: threadID)), raw: raw)
+        }
+        return try await mutate(GoogleDraft.self, base: .gmail, path: ["drafts", id], method: "PUT",
+                                body: DraftMutation(message: RawMessage(raw: raw.base64URL, threadId: threadID)))
     }
 
     public func sendDraft(id: String) async throws -> GoogleMailMessage {
         try await mutate(GoogleMailMessage.self, base: .gmail, path: ["drafts", "send"], method: "POST", body: IDBody(id: id))
     }
 
+    /// Discard, as in Gmail: removes an unsent draft. Received and sent mail only ever goes to Trash.
+    public func deleteDraft(id: String) async throws {
+        try await delete(base: .gmail, path: ["drafts", id])
+    }
+
     public func sendMessage(raw: Data, threadID: String? = nil) async throws -> GoogleMailMessage {
-        try await mutate(GoogleMailMessage.self, base: .gmail, path: ["messages", "send"], method: "POST",
-                         body: RawMessage(raw: raw.base64URL, threadId: threadID))
+        if raw.count > Self.uploadThreshold {
+            return try await upload(GoogleMailMessage.self, path: ["messages", "send"], method: "POST", metadata: UploadMessage(threadId: threadID), raw: raw)
+        }
+        return try await mutate(GoogleMailMessage.self, base: .gmail, path: ["messages", "send"], method: "POST",
+                                body: RawMessage(raw: raw.base64URL, threadId: threadID))
     }
 
     public func filters() async throws -> [GoogleFilter] {
@@ -220,6 +240,7 @@ public actor GoogleAPI {
 
     private enum Base: String {
         case gmail = "https://gmail.googleapis.com/gmail/v1/users/me"
+        case gmailUpload = "https://gmail.googleapis.com/upload/gmail/v1/users/me"
         case calendar = "https://www.googleapis.com/calendar/v3"
     }
 
@@ -228,6 +249,8 @@ public actor GoogleAPI {
         for component in path { url.appendPathComponent(component) }
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw GoogleAPIError.invalidURL }
         if !query.isEmpty { components.queryItems = query }
+        // URLComponents leaves "+" alone, which Google reads as a space (e.g. a search for from:me+news@x.com).
+        components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         guard let result = components.url else { throw GoogleAPIError.invalidURL }
         return result
     }
@@ -244,11 +267,26 @@ public actor GoogleAPI {
         return try decoder.decode(type, from: data)
     }
 
+    /// Multipart upload: JSON metadata (the thread), then the RFC 822 message itself.
+    private func upload<T: Decodable & Sendable, M: Encodable & Sendable>(_ type: T.Type, path: [String], method: String,
+                                                                         metadata: M, raw: Data) async throws -> T {
+        let boundary = "EmailCalendar-upload-\(UUID().uuidString)"
+        var body = Data("--\(boundary)\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".utf8)
+        body.append(try encoder.encode(metadata))
+        body.append(Data("\r\n--\(boundary)\r\nContent-Type: message/rfc822\r\n\r\n".utf8))
+        body.append(raw)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        let url = try endpoint(base: .gmailUpload, path: path, query: [URLQueryItem(name: "uploadType", value: "multipart")])
+        let data = try await request(url: url, method: method, body: body, contentType: "multipart/related; boundary=\(boundary)")
+        return try decoder.decode(type, from: data)
+    }
+
     private func delete(base: Base, path: [String], query: [URLQueryItem] = []) async throws {
         _ = try await request(url: endpoint(base: base, path: path, query: query), method: "DELETE")
     }
 
-    private func request(url: URL, method: String, body: Data? = nil, etag: String? = nil) async throws -> Data {
+    private func request(url: URL, method: String, body: Data? = nil, etag: String? = nil,
+                         contentType: String = "application/json; charset=utf-8") async throws -> Data {
         var transientAttempts = 0
         var refreshNextAttempt = false
         var hasRefreshedToken = false
@@ -258,13 +296,25 @@ public actor GoogleAPI {
             request.httpMethod = method
             request.timeoutInterval = 30
             request.httpBody = body
-            request.setValue("Bearer \(try await auth.accessToken(forceRefresh: refreshNextAttempt))", forHTTPHeaderField: "Authorization")
+            let token: String
+            do { token = try await auth.accessToken(forceRefresh: refreshNextAttempt) }
+            catch is CancellationError { throw CancellationError() }
+            catch { throw GoogleAPIError.authorization(error.localizedDescription) }
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             // Subsequent transient retries can reuse the freshly stored token.
             refreshNextAttempt = false
             request.setValue("application/json", forHTTPHeaderField: "Accept")
-            if body != nil { request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type") }
+            if body != nil { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
             if let etag { request.setValue(etag, forHTTPHeaderField: "If-Match") }
-            let (data, response) = try await session.data(for: request)
+            let (data, response): (Data, URLResponse)
+            do { (data, response) = try await session.data(for: request) }
+            catch let error as URLError where method == "GET" && transientAttempts < 2
+                && [.networkConnectionLost, .timedOut, .cannotConnectToHost, .dnsLookupFailed].contains(error.code) {
+                // Connections dropped right after wake are common; reads are safe to repeat.
+                transientAttempts += 1
+                try await Task.sleep(for: .seconds(pow(2, Double(transientAttempts))))
+                continue
+            }
             guard let response = response as? HTTPURLResponse else { throw GoogleAPIError.invalidResponse }
             if (200..<300).contains(response.statusCode) { return data }
             if response.statusCode == 401, !hasRefreshedToken {
@@ -315,6 +365,8 @@ public actor GoogleAPI {
         let labelListVisibility = "labelShow"
     }
     private struct RawMessage: Encodable, Sendable { var raw: String; var threadId: String? }
+    private struct UploadMessage: Encodable, Sendable { var threadId: String? }
+    private struct UploadDraft: Encodable, Sendable { var message: UploadMessage }
     private struct DraftMutation: Encodable, Sendable { var message: RawMessage }
     private struct IDBody: Encodable, Sendable { var id: String }
     private struct EmptyBody: Encodable, Sendable {}
@@ -327,8 +379,8 @@ public actor GoogleAPI {
         var summary: String?
         var description: String?
         var location: String?
-        var start: GoogleEventDateTime?
-        var end: GoogleEventDateTime?
+        var start: ExplicitDateTime?
+        var end: ExplicitDateTime?
         var recurrence: [String]?
         var attendees: [GoogleAttendee]?
         var status: String?
@@ -339,8 +391,8 @@ public actor GoogleAPI {
             summary = event.summary
             description = event.description
             location = event.location
-            start = event.start
-            end = event.end
+            start = event.start.map(ExplicitDateTime.init)
+            end = event.end.map(ExplicitDateTime.init)
             recurrence = event.recurrence
             // PATCH replaces arrays. The editor does not edit guests, so preserve
             // their full Google metadata by leaving attendees out of normal edits.
@@ -348,6 +400,20 @@ public actor GoogleAPI {
             attendees = includeAttendees ? event.attendees : nil
             status = event.status
             transparency = event.transparency
+        }
+    }
+
+    /// PATCH merges nested objects, so switching between all-day and timed must clear the other field
+    /// with an explicit null; otherwise Google keeps both `date` and `dateTime` and rejects the event.
+    private struct ExplicitDateTime: Encodable, Sendable {
+        var value: GoogleEventDateTime
+        init(_ value: GoogleEventDateTime) { self.value = value }
+        enum CodingKeys: String, CodingKey { case date, dateTime, timeZone }
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(value.date, forKey: .date)
+            try container.encode(value.dateTime, forKey: .dateTime)
+            try container.encode(value.timeZone, forKey: .timeZone)
         }
     }
 }

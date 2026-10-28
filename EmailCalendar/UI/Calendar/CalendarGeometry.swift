@@ -1,14 +1,24 @@
 #if os(macOS)
 import SwiftUI
+import os
 
 enum CalendarGeometry {
-    /// Built once: the grids call date math thousands of times while scrolling.
-    static let calendar: Calendar = {
+    /// Built once, and again when the Mac changes time zone: the grids call date math thousands of times while scrolling.
+    static var calendar: Calendar { stored.withLock { $0 } }
+    private static let stored = OSAllocatedUnfairLock(initialState: makeCalendar())
+
+    private static func makeCalendar() -> Calendar {
         var result = Calendar.current
+        result.timeZone = .current
         result.firstWeekday = 2
         result.minimumDaysInFirstWeek = 4
         return result
-    }()
+    }
+
+    /// Called after the system time zone changed (e.g. landing in another country).
+    static func timeZoneDidChange() {
+        stored.withLock { $0 = makeCalendar() }
+    }
 
     /// Events grouped by the days they touch, so a grid cell looks up its day instead of
     /// scanning every event.

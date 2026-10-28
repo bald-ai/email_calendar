@@ -7,6 +7,37 @@ import FoundationNetworking
 
 /// Runs the real mail and calendar services end to end against the in-app mock backend.
 final class MockBackendTests: XCTestCase, @unchecked Sendable {
+    func testDiscardRemovesTheDraftButKeepsTheConversation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let backend = MockGoogleBackend(fileURL: directory.appendingPathComponent("google.json"))
+        let api = GoogleAPI(auth: MockTokenProvider(), session: MockGoogleURLProtocol.session(backend: backend))
+        let mail = MailService(api: api, store: try LocalStore(url: directory.appendingPathComponent("cache.sqlite")))
+        let account = Account(id: MockGoogleBackend.accountEmail, email: MockGoogleBackend.accountEmail)
+        _ = try await mail.sync(account: account)
+        let originals = try await mail.sync(account: account).threads.first { $0.id == "t-climb" }?.messages.count
+
+        let reply = try await mail.saveDraft(OutgoingMessage(to: ["tom@beckerfamily.net"], subject: "Re: Climbing Saturday?",
+                                                             body: "Never mind", threadID: "t-climb"), account: account)
+        try await mail.discardDraft(reply, account: account)
+        // A large email goes through the upload endpoint and still lands, attachment included.
+        let pdf = OutgoingAttachment(name: "portfolio.pdf", mimeType: "application/pdf", data: Data(repeating: 7, count: 4_000_000))
+        let big = try await mail.saveDraft(OutgoingMessage(to: ["tom@beckerfamily.net"], subject: "Portfolio", attachments: [pdf]), account: account)
+        try await mail.send(big, account: account)
+        let sent = try await mail.sync(account: account).threads.flatMap(\.messages).first { $0.subject == "Portfolio" }
+        XCTAssertTrue(sent?.labels.contains("SENT") == true)
+        XCTAssertEqual(sent?.attachments.first?.name, "portfolio.pdf")
+
+        let fresh = try await mail.saveDraft(OutgoingMessage(to: ["someone@example.com"], subject: "Second thoughts"), account: account)
+        try await mail.discardDraft(fresh, account: account)
+
+        let snapshot = try await mail.sync(account: account)
+        let climb = try XCTUnwrap(snapshot.threads.first { $0.id == "t-climb" })
+        XCTAssertEqual(climb.messages.count, originals)
+        XCTAssertFalse(climb.messages.contains { $0.labels.contains("DRAFT") })
+        XCTAssertFalse(snapshot.threads.contains { $0.subject == "Second thoughts" })
+    }
+
     func testDemoMailboxAndCalendarWorkEndToEnd() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

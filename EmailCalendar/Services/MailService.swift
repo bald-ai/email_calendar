@@ -92,9 +92,12 @@ struct PendingSend: Codable, Sendable, Identifiable, Equatable {
 }
 
 enum PendingSendError: LocalizedError {
-    case draftGone
+    case draftGone, notSent
     var errorDescription: String? {
-        "This email was sent or deleted on another device during the countdown, so it wasn't sent from here."
+        switch self {
+        case .draftGone: "This email was sent or deleted on another device during the countdown, so it wasn't sent from here."
+        case .notSent: "Gmail didn't send this email; it's still in Drafts."
+        }
     }
 }
 
@@ -280,6 +283,10 @@ actor MailService {
     func saveDraft(_ outgoing: OutgoingMessage, account: Account) async throws -> OutgoingMessage {
         try await serialized(accountID: account.id) { try await self.saveDraftImpl(outgoing, account: account) }
     }
+    /// Discard: Gmail removes the unsent draft, as its own Discard does.
+    func discardDraft(_ outgoing: OutgoingMessage, account: Account) async throws {
+        try await serialized(accountID: account.id) { try await self.discardDraftImpl(outgoing, account: account) }
+    }
     /// Verified Gmail "Send mail as" addresses, the account's own first. Cached so the composer works offline.
     func sendAddresses(account: Account) async throws -> [String] {
         let entries = try await tracked { try await self.api.sendAs() }
@@ -287,7 +294,19 @@ actor MailService {
         let aliases = entries.filter { $0.isPrimary != true && $0.verificationStatus == "accepted" }.map(\.sendAsEmail)
         let addresses = [account.email] + aliases.filter { seen.insert($0.lowercased()).inserted }
         try await store.setMetadata(addresses, key: "sendAs", accountID: account.id)
+        // The Gmail "Send mail as" name for each address, so recipients see a name rather than a bare address.
+        let names = Dictionary(entries.compactMap { entry in
+            entry.displayName.flatMap { $0.isEmpty ? nil : (entry.sendAsEmail.lowercased(), $0) }
+        }, uniquingKeysWith: { first, _ in first })
+        try await store.setMetadata(names, key: "sendAsNames", accountID: account.id)
         return addresses
+    }
+    /// The From header: the chosen address with its Gmail display name when one is known.
+    private func fromHeader(_ outgoing: OutgoingMessage, account: Account) async -> String {
+        let email = outgoing.from ?? account.email
+        let names = (try? await store.metadata([String: String].self, key: "sendAsNames", accountID: account.id)) ?? [:]
+        let name = names[email.lowercased()] ?? (email.lowercased() == account.email.lowercased() ? account.displayName : "")
+        return name.isEmpty ? email : "\(name) <\(email)>"
     }
     func cachedSendAddresses(accountID: String) async throws -> [String] {
         try await store.metadata([String].self, key: "sendAs", accountID: accountID) ?? []
@@ -314,6 +333,10 @@ actor MailService {
             guard let pending = try await self.pendingSend(draftID, accountID: account.id),
                   pending.status == .waiting || pending.status == .failed || (includingUncertain && pending.status == .uncertain) else { return nil }
             try await self.store.remove(id: draftID, collection: Self.pendingCollection, accountID: account.id)
+            // The person checked Sent and dismissed it: the draft must be editable and sendable again.
+            if pending.status == .uncertain {
+                try await self.store.removeMetadata(key: "mail.sendAttempt." + draftID, accountID: account.id)
+            }
             return pending
         }
     }
@@ -393,15 +416,21 @@ actor MailService {
         let versions = threadVersions[account.id] ?? [:]
         let initial = try await store.all(MailThread.self, collection: "threads", accountID: account.id)
         let anchor = try await api.profile().historyId
-        var ids = Set(try await threadIDs(query: "newer_than:90d"))
+        var listed = try await threadHistoryIDs(query: "newer_than:90d")
         for label in ["INBOX", "DRAFT"] + Self.specialLabels {
-            ids.formUnion(try await threadIDs(labelIDs: [try labelID(label, accountID: account.id)]))
+            listed.merge(try await threadHistoryIDs(labelIDs: [try labelID(label, accountID: account.id)])) { first, _ in first }
         }
         // Gmail deletes spam after 30 days, so the whole folder stays small enough to cache.
-        ids.formUnion(try await threadIDs(labelIDs: ["SPAM"], includeSpamTrash: true))
-        ids.formUnion(try await store.all(MailLink.self, collection: PlannerService.linkCollection, accountID: account.id).map(\.threadID))
-        let sources = try await cacheSources(Array(ids), account: account, isSync: true)
-        let present = Set(sources.map(\.id))
+        listed.merge(try await threadHistoryIDs(labelIDs: ["SPAM"], includeSpamTrash: true)) { first, _ in first }
+        for link in try await store.all(MailLink.self, collection: PlannerService.linkCollection, accountID: account.id) where listed[link.threadID] == nil {
+            listed[link.threadID] = ""
+        }
+        // A thread cached with Gmail's current history ID is up to date, so an interrupted first sync
+        // (or an expired-history rebuild) downloads only what it doesn't have yet.
+        let cachedHistory = Dictionary(initial.map { ($0.id, $0.historyID ?? "") }, uniquingKeysWith: { first, _ in first })
+        let stale = listed.filter { id, history in history.isEmpty || cachedHistory[id] != history }.map(\.key)
+        let sources = try await cacheSources(stale, account: account, isSync: true)
+        let present = Set(listed.keys).subtracting(Set(stale).subtracting(sources.map(\.id)))
         try await serialized(accountID: account.id) {
             let linkedIDs = Set(try await self.store.all(MailLink.self, collection: PlannerService.linkCollection, accountID: account.id).map(\.threadID))
             for old in initial where !present.contains(old.id) {
@@ -507,6 +536,8 @@ actor MailService {
     private nonisolated func screeningChange(_ thread: MailThread, rules: SenderRuleIndex, account: Account) -> (adding: Set<String>, removing: Set<String>)? {
         guard !thread.labels.contains("TRASH"), !thread.isSpam,
               let incoming = thread.messages.reversed().first(where: { !$0.labels.contains("SENT") && !$0.labels.contains("DRAFT") && !$0.labels.contains("SPAM") && $0.from.email != account.email.lowercased() }) else { return nil }
+        // A From header that can't be read has no sender to approve, so it must not trap the thread in the Screener.
+        guard !incoming.from.email.isEmpty, !incoming.from.email.contains(where: \.isWhitespace) else { return nil }
         let decision = rules.rule(for: incoming.from.email)?.decision
         if decision == .blocked {
             if thread.labels.contains("INBOX") || thread.labels.contains("HEY/Screener") || !thread.labels.contains("HEY/Screened Out") {
@@ -516,22 +547,35 @@ actor MailService {
             return (["INBOX"], ["HEY/Screener", "HEY/Screened Out"])
         } else if decision == nil && thread.labels.contains("INBOX") {
             return (["HEY/Screener"], ["INBOX"])
+        } else if decision == nil && thread.labels.contains("HEY/Screened Out") {
+            // Filtered while a block was being undone, or by a Gmail filter the app has no rule for.
+            return (["HEY/Screener"], ["HEY/Screened Out"])
         }
         return nil
     }
 
     private func reconcileScreener(account: Account) async throws {
         let threads = try await store.all(MailThread.self, collection: "threads", accountID: account.id)
+        // People you wrote to from Gmail on another device are approved too, so their replies stay in the Imbox.
+        let sentTo = threads.flatMap(\.messages).filter { $0.labels.contains("SENT") && !$0.labels.contains("DRAFT") }
+            .flatMap { $0.to + $0.cc + $0.bcc }.map(\.email)
+        try await serialized(accountID: account.id) { try await self.approveUnknown(sentTo, account: account) }
         let rules = try await currentRuleIndex(accountID: account.id)
+        // One thread Gmail keeps rejecting must not stop the others from being screened.
+        var firstError: (any Error)?
         for reference in threads where screeningChange(reference, rules: rules, account: account) != nil {
-            try await serialized(accountID: account.id) {
-                guard let thread = try await self.store.load(MailThread.self, id: reference.id, collection: "threads", accountID: account.id) else { return }
-                let currentRules = try await self.currentRuleIndex(accountID: account.id)
-                if let change = self.screeningChange(thread, rules: currentRules, account: account) {
-                    _ = try await self.changeLabels(threadID: thread.id, adding: change.adding, removing: change.removing, account: account)
+            do {
+                try await serialized(accountID: account.id) {
+                    guard let thread = try await self.store.load(MailThread.self, id: reference.id, collection: "threads", accountID: account.id) else { return }
+                    let currentRules = try await self.currentRuleIndex(accountID: account.id)
+                    if let change = self.screeningChange(thread, rules: currentRules, account: account) {
+                        _ = try await self.changeLabels(threadID: thread.id, adding: change.adding, removing: change.removing, account: account)
+                    }
                 }
-            }
+            } catch is CancellationError { throw CancellationError() }
+            catch { firstError = firstError ?? error }
         }
+        if let firstError { throw firstError }
     }
 
     private func fetchThreadImpl(id: String, account: Account) async throws -> MailThread {
@@ -635,7 +679,8 @@ actor MailService {
     /// Retain the durable due record until Gmail accepts the return-to-Inbox mutation.
     /// surfacedAt makes launch processing idempotent and keeps the subtle marker across restarts.
     private func processDueBubblesImpl(account: Account, now: Date = .now) async throws -> [MailThread] {
-        try await ensureCachedLabels(accountID: account.id)
+        // Also loads the draft map, so threads refreshed here keep their draft IDs.
+        try await prepare(account: account)
         let bubbles = try await store.all(BubbleRecord.self, collection: "bubbles", accountID: account.id)
         var surfaced: [MailThread] = []
         for var bubble in bubbles where bubble.surfacedAt == nil && bubble.dueAt <= now {
@@ -671,7 +716,16 @@ actor MailService {
         var affected = Set(oldRules.filter { $0.key == key || (domain && !$0.isDomain && $0.key.hasSuffix(key)) }.map(\.key)).union([key])
         if let domainDependency { affected.insert(domainDependency.key) }
         let previous = oldRules.filter { affected.contains($0.key) }
-        let ids = try await threadIDs(query: "from:(\(key))")
+        let ids: [String]
+        if decision == .approved {
+            // Only mail waiting in the Screener or screened out comes to the Imbox; archived, Set Aside
+            // and Bubble Up mail from them stays where it is.
+            var screened = Set<String>()
+            for label in ["HEY/Screener", "HEY/Screened Out"] {
+                screened.formUnion(try await threadIDs(query: "from:(\(key))", labelIDs: [try labelID(label, accountID: account.id)]))
+            }
+            ids = Array(screened)
+        } else { ids = try await threadIDs(query: "from:(\(key))") }
         var states: [ThreadState] = []
         for id in ids { states.append(try await capture(threadID: id, account: account)) }
         var target = SenderRule(accountID: account.id, key: key, decision: decision,
@@ -773,7 +827,7 @@ actor MailService {
     private func saveDraftImpl(_ outgoing: OutgoingMessage, account: Account) async throws -> OutgoingMessage {
         try await prepare(account: account)
         if try await sendAttempt(outgoing, account: account) != nil { throw MailDeliveryUncertainError() }
-        let raw = try MIMEComposer.compose(outgoing, from: outgoing.from ?? account.email)
+        let raw = try MIMEComposer.compose(outgoing, from: await fromHeader(outgoing, account: account))
         let draft: GoogleDraft
         if let id = outgoing.draftID { draft = try await api.updateDraft(id: id, raw: raw, threadID: outgoing.threadID) }
         else { draft = try await api.createDraft(raw: raw, threadID: outgoing.threadID) }
@@ -791,6 +845,24 @@ actor MailService {
         return saved
     }
 
+    private func discardDraftImpl(_ outgoing: OutgoingMessage, account: Account) async throws {
+        try await prepare(account: account)
+        guard let draftID = outgoing.draftID else { return }
+        // It may already have been sent: never remove the only record of what went out.
+        if try await sendAttempt(outgoing, account: account) != nil { throw MailDeliveryUncertainError() }
+        do { try await api.deleteDraft(id: draftID) }
+        catch let error as GoogleAPIError where error.statusCode == 404 { /* Already gone. */ }
+        draftMaps[account.id] = draftMaps[account.id]?.filter { $0.value != draftID }
+        try await store.setMetadata(draftMaps[account.id] ?? [:], key: "draftIDs", accountID: account.id)
+        let threads = try await store.all(MailThread.self, collection: "threads", accountID: account.id)
+        guard let thread = threads.first(where: { $0.messages.contains { $0.draftID == draftID } }) else { return }
+        do { _ = try await refresh(threadID: thread.id, accountID: account.id) }
+        catch let error as GoogleAPIError where error.statusCode == 404 {
+            // A new email's thread held only the draft.
+            try await store.remove(id: thread.id, collection: "threads", accountID: account.id)
+        }
+    }
+
     private func sendImpl(_ outgoing: OutgoingMessage, account: Account) async throws -> MailSendReceipt {
         try await prepare(account: account)
         if let attempt = try await sendAttempt(outgoing, account: account) {
@@ -800,7 +872,7 @@ actor MailService {
         guard !outgoing.to.isEmpty || !outgoing.cc.isEmpty || !outgoing.bcc.isEmpty else { throw MailError.noRecipients }
         var outgoing = outgoing
         if outgoing.rfcMessageID == nil { outgoing.rfcMessageID = "<\(UUID().uuidString.lowercased())@emailcalendar.local>" }
-        let raw = try MIMEComposer.compose(outgoing, from: outgoing.from ?? account.email)
+        let raw = try MIMEComposer.compose(outgoing, from: await fromHeader(outgoing, account: account))
         // Draft updates cannot deliver mail. Finish this step before recording an attempt.
         if let draftID = outgoing.draftID { _ = try await api.updateDraft(id: draftID, raw: raw, threadID: outgoing.threadID) }
         let attempt = MailSendAttempt(rfcMessageID: outgoing.rfcMessageID!, startedAt: .now, receipt: nil)
@@ -898,6 +970,7 @@ actor MailService {
         let neverConnected = (error as? URLError).map {
             [URLError.notConnectedToInternet, .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost].contains($0.code)
         } ?? false
+        if case .authorization = error as? GoogleAPIError { return true }
         return neverConnected || (status.map { (400..<500).contains($0) && $0 != 408 } ?? false)
     }
 
@@ -937,6 +1010,12 @@ actor MailService {
                 pageToken = next
             }
         } catch { /* A failed lookup is not evidence that sending failed. */ }
+        // Gmail deletes a draft when it sends it. Still there well after the attempt means it was never sent.
+        if let draftID = outgoing.draftID, let started = attempt.startedAt, Date.now.timeIntervalSince(started) > 120,
+           (try? await api.draft(id: draftID)) != nil {
+            try await store.removeMetadata(key: sendKey(outgoing), accountID: account.id)
+            throw PendingSendError.notSent
+        }
         throw MailDeliveryUncertainError()
     }
 
@@ -1122,13 +1201,19 @@ actor MailService {
     }
 
     private func threadIDs(query: String? = nil, labelIDs: [String] = [], includeSpamTrash: Bool = false) async throws -> [String] {
-        var pageToken: String?, ids = Set<String>()
+        Array(try await threadHistoryIDs(query: query, labelIDs: labelIDs, includeSpamTrash: includeSpamTrash).keys)
+    }
+
+    /// Thread IDs with Gmail's latest history ID for each ("" when Gmail gives none).
+    private func threadHistoryIDs(query: String? = nil, labelIDs: [String] = [], includeSpamTrash: Bool = false) async throws -> [String: String] {
+        var pageToken: String?, result: [String: String] = [:]
         repeat {
             let page = try await api.listThreads(query: query, labelIDs: labelIDs, pageToken: pageToken, maxResults: 500,
                                                  includeSpamTrash: includeSpamTrash)
-            ids.formUnion(page.items.map(\.id)); pageToken = page.nextPageToken
+            for thread in page.items { result[thread.id] = thread.historyId ?? "" }
+            pageToken = page.nextPageToken
         } while pageToken != nil
-        return Array(ids)
+        return result
     }
 
     private func cacheSources(_ ids: [String], account: Account, isSync: Bool) async throws -> [MailThread] {

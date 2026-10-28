@@ -21,13 +21,16 @@ struct MailRootView: View {
     @State private var loadingComposition = false
     @State private var powerFocusID: String?
     @State private var powerScrollRequest: String?
+    /// Threads with an action still running, so a second press doesn't act on them again.
+    @State private var busy: Set<String> = []
 
     private var mailbox: Mailbox { store.navigation }
     /// In the order the page shows them: the Imbox lists new mail above previously seen.
     private var threads: [MailThread] {
         let visible = store.visibleThreads(mailbox: mailbox)
         guard mailbox == .imbox, store.searchQuery.isEmpty else { return visible }
-        return visible.filter(\.unread) + visible.filter { !$0.unread }
+        let isNew = { (thread: MailThread) in thread.unread || thread.id == store.openedUnreadID }
+        return visible.filter(isNew) + visible.filter { !isNew($0) }
     }
     /// The Screener lists one row per sender.
     private var isScreener: Bool { mailbox == .screener && store.searchQuery.isEmpty }
@@ -40,6 +43,8 @@ struct MailRootView: View {
     private var focused: MailThread? {
         if let openThread { return openThread }
         if isPowerStack { return powerThreads.first { $0.id == powerFocusID } ?? powerThreads.first }
+        // Screener rows are senders, not threads, and show no keyboard focus.
+        if isScreener { return nil }
         return threads.first { $0.id == store.selectedThreadID }
     }
     /// The picked rows when the list has any, otherwise the focused one.
@@ -50,6 +55,9 @@ struct MailRootView: View {
         }
         return focused.map { [$0] } ?? []
     }
+    /// The one email a single-email action (to-do, link, reply, forward) is for: the picked row when exactly
+    /// one is picked, never the focused row next to a selection it isn't part of.
+    private var single: MailThread? { targets.count == 1 ? targets.first : nil }
     private func replyMessage(_ thread: MailThread?) -> MailMessage? {
         thread?.messages.filter { !$0.labels.contains("DRAFT") && $0.draftID == nil }.max { $0.date < $1.date }
     }
@@ -127,6 +135,12 @@ struct MailRootView: View {
             let remaining = store.selection.intersection(ids)
             if remaining != store.selection { store.selection = remaining }
         }
+        .onChange(of: store.openThreadID) { showsMore = false }
+        .onChange(of: powerThreads.map(\.id)) { old, new in
+            // The card in view went away: keys go to the one that took its place, not to the top card.
+            guard let id = powerFocusID, !new.contains(id), let index = old.firstIndex(of: id), !new.isEmpty else { return }
+            powerFocusID = new[min(index, new.count - 1)]
+        }
     }
 
     enum ThreadAction { case archive, setAside, trash, spam, notSpam, toggleRead, seen, moveToTodo, link, bubbleUp }
@@ -137,7 +151,9 @@ struct MailRootView: View {
     }
 
     private func perform(_ action: ThreadAction, on thread: MailThread) {
+        guard busy.insert(thread.id).inserted else { return }
         Task {
+            defer { busy.remove(thread.id) }
             switch action {
             case .archive: await store.archive(thread)
             case .setAside: await store.toggleSetAside(thread)
@@ -198,7 +214,7 @@ struct MailRootView: View {
             powerFocusID = target; powerScrollRequest = target
             return
         }
-        guard !threads.isEmpty else { return }
+        guard !threads.isEmpty, !isScreener || store.openThreadID != nil else { return }
         let current = threads.firstIndex { $0.id == (store.openThreadID ?? store.selectedThreadID) }
         let target = current.map { min(max($0 + offset, 0), threads.count - 1) } ?? (offset > 0 ? 0 : threads.count - 1)
         if store.openThreadID != nil { store.open(threads[target]) } else { store.selectedThreadID = threads[target].id }
@@ -217,6 +233,8 @@ struct MailRootView: View {
             if let next = store.selectedThreadID { store.selection.insert(next); store.selectionAnchor = next }
             return true
         }
+        // + is ⇧= on US keyboards.
+        if modifiers == .shift && character == "+" { store.focusTodoField(); return true }
         guard modifiers.isEmpty else { return false }
         if event.keyCode == 53 {
             if store.linkingThreadID != nil { store.cancelLinking(); return true }
@@ -236,8 +254,8 @@ struct MailRootView: View {
             guard isListShowing, !isScreener else { return false }
             if focused == nil { moveSelection(1) }
             if let id = focused?.id { store.toggleSelection(id) }
-        case "t": if let focused { perform(.moveToTodo, on: focused) }
-        case "l": if let focused { perform(.link, on: focused) }
+        case "t": if let single { perform(.moveToTodo, on: single) } else { return false }
+        case "l": if let single { perform(.link, on: single) } else { return false }
         case "+", "=": store.focusTodoField()
         case "j": moveSelection(1)
         case "k": moveSelection(-1)
@@ -253,8 +271,8 @@ struct MailRootView: View {
         case "s" where isPowerStack: if let focused { perform(.seen, on: focused) }
         case "a", "s": perform(.setAside, on: targets)
         case "z", "b": perform(.bubbleUp, on: targets)
-        case "r": if let message = replyMessage(focused) { compose(message, .reply) }
-        case "f": if let message = replyMessage(focused) { compose(message, .forward) }
+        case "r": if let message = replyMessage(single) { compose(message, .reply) } else { return false }
+        case "f": if let message = replyMessage(single) { compose(message, .forward) } else { return false }
         case "m": if store.openThreadID != nil { showsMore.toggle() } else { return false }
         case "p": if store.openThreadID == nil, mailbox == .imbox, !store.poweringThrough { store.powerThroughNew() } else { return false }
         default: return false
@@ -424,8 +442,8 @@ private struct MailboxPage: View {
                 Text(emptyText).font(.callout).foregroundStyle(Theme.secondary).multilineTextAlignment(.center)
             }.padding(.top, 40)
         } else if mailbox == .imbox && !isSearch {
-            let fresh = threads.filter(\.unread)
-            let seen = threads.filter { !$0.unread }
+            let fresh = threads.filter { $0.unread || $0.id == store.openedUnreadID }
+            let seen = threads.filter { !$0.unread && $0.id != store.openedUnreadID }
             if !fresh.isEmpty {
                 SectionRule(title: "NEW FOR YOU") {
                     Button { store.powerThroughNew() } label: { Label("Power Through New", systemImage: "bolt.fill") }

@@ -32,6 +32,30 @@ final class GoogleAPITests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(guests.first?["comment"] as? String, "Arriving late")
     }
 
+    func testLargeMessagesUseTheUploadEndpointAndSmallOnesStayJSON() async throws {
+        let recorder = GoogleRequestRecorder()
+        let harness = APIHarness { request in
+            recorder.append(request)
+            return MockGoogleResponse(body: #"{"id":"draft-1","message":{"id":"m1","threadId":"t1"}}"#)
+        }
+        defer { harness.close() }
+        let large = Data(("Subject: Portfolio\r\n\r\n" + String(repeating: "A", count: GoogleAPI.uploadThreshold + 1)).utf8)
+        _ = try await harness.api.createDraft(raw: large, threadID: "t1")
+        _ = try await harness.api.createDraft(raw: Data("Subject: Short\r\n\r\nHi".utf8), threadID: "t1")
+
+        let upload = try XCTUnwrap(recorder.requests.first)
+        XCTAssertEqual(upload.url?.path, "/upload/gmail/v1/users/me/drafts")
+        XCTAssertTrue(upload.url?.query?.contains("uploadType=multipart") == true)
+        XCTAssertTrue(upload.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/related; boundary=") == true)
+        let body = String(decoding: try XCTUnwrap(upload.httpBody), as: UTF8.self)
+        XCTAssertTrue(body.contains(#"{"message":{"threadId":"t1"}}"#))
+        XCTAssertTrue(body.contains("Content-Type: message/rfc822\r\n\r\nSubject: Portfolio"))
+
+        let small = try XCTUnwrap(recorder.requests.last)
+        XCTAssertEqual(small.url?.path, "/gmail/v1/users/me/drafts")
+        XCTAssertEqual(small.value(forHTTPHeaderField: "Content-Type"), "application/json; charset=utf-8")
+    }
+
     func testUnauthorizedRequestRefreshesOnceThenRetries() async throws {
         let harness = APIHarness { request in
             if request.value(forHTTPHeaderField: "Authorization")?.hasSuffix("|stale") == true {

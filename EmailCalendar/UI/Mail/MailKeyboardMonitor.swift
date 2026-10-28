@@ -32,9 +32,13 @@ struct MailKeyboardMonitor: NSViewRepresentable {
                 let handled = MainActor.assumeIsolated {
                     guard let self, self.enabled, event.window === self.view?.window else { return false }
                     let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-                    let isPalette = modifiers == .command && event.charactersIgnoringModifiers?.lowercased() == "k"
+                    let character = event.charactersIgnoringModifiers?.lowercased()
+                    let isPalette = modifiers == .command && character == "k"
+                    // Read-only text (a plain-text email body) can hold focus without taking typing.
                     if !isPalette, let responder = event.window?.firstResponder,
-                       responder is NSTextView || responder is NSTextField { return false }
+                       (responder as? NSTextView)?.isEditable == true || responder is NSTextField { return false }
+                    // A held key moves through the list, but never repeats an action on whatever comes next.
+                    if event.isARepeat, character != "j", character != "k" { return false }
                     return self.handle?(event) == true
                 }
                 return handled ? nil : event

@@ -62,8 +62,7 @@ enum MailMapping {
                 }
                 data = Data(decoded)
             }
-            let stringEncoding: String.Encoding = charset.contains("8859") || charset == "latin1" ? .isoLatin1 : (charset == "windows-1252" ? .windowsCP1252 : .utf8)
-            result += data.flatMap { String(data: $0, encoding: stringEncoding) } ?? nsValue.substring(with: match.range)
+            result += data.flatMap { string($0, charset: charset) } ?? nsValue.substring(with: match.range)
             end = match.range.location + match.range.length
             previousEncoded = true
         }
@@ -71,11 +70,44 @@ enum MailMapping {
         return result
     }
 
+    /// Text in its declared charset (Czech mail is often windows-1250 or ISO-8859-2), else UTF-8, else Latin-1.
+    static func string(_ data: Data, charset: String?) -> String? {
+        if let encoding = encoding(charset: charset), let text = String(data: data, encoding: encoding) { return text }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+    }
+
+    private static func charset(of part: GoogleMailPart) -> String? {
+        guard let type = part.headers?.first(where: { $0.name.caseInsensitiveCompare("Content-Type") == .orderedSame })?.value,
+              let range = type.range(of: "charset=", options: .caseInsensitive) else { return nil }
+        return type[range.upperBound...].split(separator: ";").first.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"' \t")) }
+    }
+
+    private static func encoding(charset: String?) -> String.Encoding? {
+        guard let name = charset?.lowercased(), !name.isEmpty else { return nil }
+        switch name {
+        case "utf-8", "utf8": return .utf8
+        // As browsers do: mail labelled Latin-1 or ASCII is usually really windows-1252 (curly quotes, €).
+        case "us-ascii", "ascii", "iso-8859-1", "iso8859-1", "latin1", "windows-1252", "cp1252": return .windowsCP1252
+        case "iso-8859-2", "iso8859-2", "latin2": return .isoLatin2
+        case "windows-1250", "cp1250": return .windowsCP1250
+        case "windows-1251", "cp1251": return .windowsCP1251
+        case "shift_jis", "shift-jis", "sjis": return .shiftJIS
+        case "iso-2022-jp": return .iso2022JP
+        case "euc-jp": return .japaneseEUC
+        default:
+            #if canImport(Darwin)
+            let encoding = CFStringConvertIANACharSetNameToEncoding(name as CFString)
+            if encoding != kCFStringEncodingInvalidId { return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(encoding)) }
+            #endif
+            return nil
+        }
+    }
+
     static func message(_ source: GoogleMailMessage, accountID: String, labels: [String: String], draftID: String? = nil) -> MailMessage {
         let parts = source.payload?.descendants ?? []
         func text(mime: String) -> String {
             parts.filter { $0.mimeType == mime && ($0.filename ?? "").isEmpty }.compactMap { part in
-                part.decodedData.flatMap { String(data: $0, encoding: .utf8) ?? String(data: $0, encoding: .isoLatin1) }
+                part.decodedData.flatMap { string($0, charset: charset(of: part)) }
             }.joined(separator: "\n")
         }
         let html = text(mime: "text/html")
@@ -87,7 +119,7 @@ enum MailMapping {
                            size: part.body?.size ?? 0, inlineData: part.decodedData,
                            contentID: part.headers?.first { $0.name.caseInsensitiveCompare("Content-ID") == .orderedSame }?.value.trimmingCharacters(in: CharacterSet(charactersIn: "<>")))
         }
-        let references = (source.header("References") ?? "").split(whereSeparator: \.isWhitespace).map(String.init)
+        let references = (source.header("References") ?? "").split { $0.isWhitespace || $0 == "," }.map(String.init)
         return MailMessage(id: source.id, threadID: source.threadId, accountID: accountID,
                            from: addresses(source.header("From")).first ?? MailAddress(email: ""),
                            to: addresses(source.header("To")), cc: addresses(source.header("Cc")), bcc: addresses(source.header("Bcc")),
