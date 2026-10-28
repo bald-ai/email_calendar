@@ -10,6 +10,8 @@ struct MailThreadView: View {
     var bubble: () -> Void
     var act: (MailRootView.ThreadAction) -> Void
     @Binding var showsMore: Bool
+    /// Back beside the subject is fully on screen; once it scrolls away the top bar shows its own.
+    @State private var backInView = true
 
     private var messages: [MailMessage] { thread.messages.sorted { $0.date < $1.date } }
     private var replyTarget: MailMessage? {
@@ -34,11 +36,21 @@ struct MailThreadView: View {
                                 .overlay(Circle().stroke(Theme.window, lineWidth: 2))
                         }
                     }.padding(.top, 14)
-                    Text(thread.subject.isEmpty ? "(no subject)" : thread.subject)
-                        .font(.system(size: 30, weight: .bold)).multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 20)
-                        .draggableThread(thread)
-                        .help("Drag onto an event or to-do to link this email")
+                    SubjectHeaderLayout(capCenter: NSFont.systemFont(ofSize: 30, weight: .bold).capHeight / 2) {
+                        Button { store.closeThread() } label: {
+                            Label(store.threadBackTitle, systemImage: "chevron.left").labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(PillButtonStyle(fill: Theme.back, foreground: Color(hex: 0x10372B)))
+                        .help("Back (Esc)")
+                        .onGeometryChange(for: Bool.self) { geometry in
+                            (geometry.bounds(of: .scrollView)?.minY ?? 0) <= 0
+                        } action: { backInView = $0 }
+                        Text(thread.subject.isEmpty ? "(no subject)" : thread.subject)
+                            .font(.system(size: 30, weight: .bold)).multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .draggableThread(thread)
+                            .help("Drag onto an event or to-do to link this email")
+                    }
                     ThreadLinksBar(thread: thread)
                     if let due = thread.bubbleUpAt {
                         Label("Bubbles up \(due.formatted(date: .abbreviated, time: .shortened))", systemImage: "bubbles.and.sparkles")
@@ -57,6 +69,7 @@ struct MailThreadView: View {
             .scrollIndicators(.never)
             actionBar.padding(.bottom, 22)
         }
+        .preference(key: ThreadBackInViewKey.self, value: backInView)
     }
 
     private var actionBar: some View {
@@ -104,6 +117,56 @@ struct MailThreadView: View {
 
     private func barButton(_ title: String, symbol: String, key: String, perform: @escaping () -> Void) -> some View {
         ActionBarButton(title: title, symbol: symbol, key: key, perform: perform)
+    }
+}
+
+/// The open thread's own Back is on screen, so the top bar leaves its one out.
+struct ThreadBackInViewKey: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+}
+
+extension AppStore {
+    /// Where Back from the open thread goes: the Power Through stack, or the mailbox under the thread.
+    var threadBackTitle: String {
+        if poweringThrough { return "Power Through" }
+        return navigation == .imbox ? "Back" : navigation.title
+    }
+}
+
+/// The subject centered over the thread, with Back level with its first line at the leading edge.
+/// The subject keeps the full width while centering it leaves Back clear; otherwise it wraps clear of Back on both sides.
+private struct SubjectHeaderLayout: Layout {
+    /// Half the subject font's cap height, so Back sits level with the subject's capitals.
+    var capCenter: CGFloat
+    var spacing: CGFloat = 16
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 790
+        let (back, title) = frames(width: width, subviews: subviews)
+        return CGSize(width: width, height: max(back.maxY, title.maxY))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let (back, title) = frames(width: bounds.width, subviews: subviews)
+        for (subview, frame) in zip(subviews, [back, title]) {
+            subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY), proposal: ProposedViewSize(frame.size))
+        }
+    }
+
+    private func frames(width: CGFloat, subviews: Subviews) -> (back: CGRect, title: CGRect) {
+        let backSize = subviews[0].sizeThatFits(.unspecified)
+        let clearance = backSize.width + spacing
+        var titleProposal = ProposedViewSize(width: width, height: nil)
+        if (width - subviews[1].sizeThatFits(titleProposal).width) / 2 < clearance {
+            titleProposal.width = max(0, width - 2 * clearance)
+        }
+        let title = subviews[1].dimensions(in: titleProposal)
+        let backY = title[VerticalAlignment.firstTextBaseline] - capCenter - backSize.height / 2
+        // A pill taller than the subject's first line pushes both down rather than poking out above.
+        let shift = max(0, -backY)
+        return (CGRect(origin: CGPoint(x: 0, y: backY + shift), size: backSize),
+                CGRect(x: (width - title.width) / 2, y: shift, width: title.width, height: title.height))
     }
 }
 

@@ -47,7 +47,7 @@ struct PowerThroughPage: View {
                     }
                     Spacer(minLength: 90)
                 }
-                .frame(maxWidth: 880).frame(maxWidth: .infinity).padding(.horizontal, 64)
+                .frame(maxWidth: 920).frame(maxWidth: .infinity).padding(.horizontal, 64)
             }
             .scrollIndicators(.automatic)
             .onChange(of: scrollRequest) { _, id in
@@ -87,8 +87,12 @@ private struct PowerThroughCard: View {
     private static let collapsedHeight: CGFloat = 440
     private static let railWidth: CGFloat = 84
     private static let railHeight: CGFloat = 5 * RailButton.height + 4 * 6
-    /// Leaves room for the rail beside the message.
-    private static let trailingPadding: CGFloat = 66
+    private static let topPadding: CGFloat = 36
+    private static let bottomPadding: CGFloat = 30
+    /// The rail's distance from the card's trailing edge.
+    private static let railInset: CGFloat = 24
+    /// The rail has a column of its own inside the card, clear of the message.
+    private static let trailingPadding: CGFloat = railInset + railWidth + 28
 
     /// The newest real message; drafts never lead a card.
     private var message: MailMessage? {
@@ -117,8 +121,8 @@ private struct PowerThroughCard: View {
             messageBody
             footer.padding(.top, 14)
         }
-        .padding(.top, 36).padding(.bottom, 30).padding(.leading, 44).padding(.trailing, Self.trailingPadding)
-        .frame(maxWidth: .infinity, minHeight: Self.railHeight + 150, alignment: .topLeading)
+        .padding(.top, Self.topPadding).padding(.bottom, Self.bottomPadding).padding(.leading, 44).padding(.trailing, Self.trailingPadding)
+        .frame(maxWidth: .infinity, minHeight: Self.topPadding + Self.railHeight + Self.bottomPadding, alignment: .topLeading)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 28))
         .overlay(alignment: .topTrailing) { stickyRail }
         .task(id: message?.id) { await loadMessage() }
@@ -203,14 +207,15 @@ private struct PowerThroughCard: View {
     }
 
     /// The rail rides the bottom of the window, but never leaves its card: it stops at the card's
-    /// bottom edge, and below the subject when the card is only just scrolling in.
+    /// bottom padding, and level with the subject when the card is only just scrolling in.
     private var stickyRail: some View {
         GeometryReader { geometry in
-            let cardBottom = geometry.size.height - Self.railHeight - 30
+            let cardBottom = geometry.size.height - Self.railHeight - Self.bottomPadding
             let windowBottom = (geometry.bounds(of: .scrollView)?.maxY ?? geometry.size.height) - Self.railHeight - 24
-            rail.offset(x: Self.railWidth / 2 - 4, y: max(0, min(cardBottom, max(150, windowBottom))))
+            rail.offset(y: max(Self.topPadding, min(cardBottom, windowBottom)))
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
+        .padding(.trailing, Self.railInset)
     }
 
     private var rail: some View {

@@ -11,6 +11,8 @@ struct AppShellView: View {
     @State private var searching = false
     @State private var searchText = ""
     @FocusState private var searchFocused: Bool
+    /// The open thread shows Back beside its subject, close to where the reading happens.
+    @State private var threadBackInView = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -36,6 +38,7 @@ struct AppShellView: View {
             }
         }
         .animation(.easeOut(duration: 0.14), value: showsMenu)
+        .onPreferenceChange(ThreadBackInViewKey.self) { threadBackInView = $0 }
         .foregroundStyle(Theme.text)
         .disabled(store.isQuitting)
         // Outside the disabled shell, so pending emails can still be previewed, sent or undone while quitting.
@@ -103,6 +106,7 @@ struct AppShellView: View {
             }
         }
         .padding(.horizontal, 26).frame(height: 54)
+        .animation(.easeOut(duration: 0.15), value: threadBackInView)
     }
 
     /// Days and To-do: which drawer is beside mail. Same as ← / → or a two-finger swipe.
@@ -130,7 +134,8 @@ struct AppShellView: View {
     }
 
     private var showsBack: Bool {
-        store.isSignedIn && !store.isComposing && (store.openThreadID != nil || store.poweringThrough || store.navigation != .imbox || !store.searchQuery.isEmpty)
+        store.isSignedIn && !store.isComposing && !threadBackInView
+            && (store.openThreadID != nil || store.poweringThrough || store.navigation != .imbox || !store.searchQuery.isEmpty)
     }
 
     /// A popover rather than a Menu: macOS menus flatten custom labels, which would lose the avatar.
@@ -166,11 +171,7 @@ struct AppShellView: View {
     }
 
     private var backTitle: String {
-        if store.openThreadID != nil {
-            if store.poweringThrough { return "Power Through" }
-            return store.navigation == .imbox ? "Back" : store.navigation.title
-        }
-        return "Imbox"
+        store.openThreadID != nil ? store.threadBackTitle : "Imbox"
     }
 
     private func goBack() {

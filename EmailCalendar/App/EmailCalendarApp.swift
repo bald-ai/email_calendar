@@ -35,7 +35,7 @@ struct EmailCalendarApp: App {
             CommandGroup(after: .newItem) {
                 Button("Show Week Overlay") { overlay.toggle() }
                 Button("Refresh") { Task { await store.refresh() } }
-                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .keyboardShortcut("r", modifiers: .command)
                 if store.isDemoMode {
                     Button("Simulate Incoming Email") { Task { await store.simulateIncomingMail() } }
                         .keyboardShortcut("m", modifiers: [.command, .shift])

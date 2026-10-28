@@ -290,7 +290,7 @@ struct MailRootView: View {
             MailPaletteCommand(title: "Write a new email", symbol: "square.and.pencil", shortcut: "c") { composition = .newMessage },
             MailPaletteCommand(title: "Search mail", symbol: "magnifyingglass", shortcut: "/") { searchFocus() },
             MailPaletteCommand(title: "Power through new mail", symbol: "bolt", shortcut: "p") { store.navigation = .imbox; store.powerThroughNew() },
-            MailPaletteCommand(title: "Refresh mail and calendar", symbol: "arrow.clockwise", shortcut: "") { Task { await store.refresh() } },
+            MailPaletteCommand(title: "Refresh mail and calendar", symbol: "arrow.clockwise", shortcut: "⌘R") { Task { await store.refresh() } },
             MailPaletteCommand(title: "Show the next seven days", symbol: "calendar", shortcut: "←") { store.drawerPosition = 1 },
             MailPaletteCommand(title: "Show to-dos", symbol: "checklist", shortcut: "→") { store.drawerPosition = -1 },
             MailPaletteCommand(title: "Add a to-do", symbol: "plus", shortcut: "+") { store.focusTodoField() },
@@ -558,18 +558,21 @@ struct MailThreadRow: View {
     var isLinked = false
     /// Picked for an action on several emails at once.
     var isPicked = false
-    /// Shown on hover in place of the avatar, so rows can be picked without a modifier key.
+    /// Shown beside the avatar on hover, so rows can be picked without a modifier key.
     var pick: (() -> Void)?
     @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 10) {
             Circle().fill(thread.unread ? Theme.unread : .clear).frame(width: 6, height: 6)
-            if let pick, isPicked || hovering {
-                PickCircle(isPicked: isPicked, size: 34, action: pick)
-            } else {
-                Avatar(name: personName, key: personKey)
+            if let pick {
+                if isPicked || hovering {
+                    PickCircle(isPicked: isPicked, size: 18, action: pick)
+                } else {
+                    Color.clear.frame(width: 18, height: 18).accessibilityHidden(true)
+                }
             }
+            Avatar(name: personName, key: personKey)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     if thread.bubbledAt != nil && mailbox == .imbox {

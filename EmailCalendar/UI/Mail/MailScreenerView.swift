@@ -51,13 +51,14 @@ private struct ScreenerSenderRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            if isPicked || hovering {
+                PickCircle(isPicked: isPicked, size: 18) { store.toggleSelection(thread.id) }
+            } else {
+                Color.clear.frame(width: 18, height: 18).accessibilityHidden(true)
+            }
             Button(action: select) {
                 HStack(spacing: 12) {
-                    if isPicked || hovering {
-                        PickCircle(isPicked: isPicked, size: 38) { store.toggleSelection(thread.id) }
-                    } else {
-                        Avatar(name: thread.sender.displayName, key: thread.sender.email, size: 38)
-                    }
+                    Avatar(name: thread.sender.displayName, key: thread.sender.email, size: 38)
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
                             Text(thread.sender.displayName).font(.system(size: 15, weight: .semibold)).lineLimit(1)

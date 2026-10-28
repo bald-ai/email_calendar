@@ -78,11 +78,11 @@ struct MailHTMLView: NSViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { measure(webView) }
 
         func measure(_ webView: WKWebView) {
-            // This app-owned expression measures content; email scripts remain
-            // disabled. Clamp exceptionally large messages to a scrollable view.
+            // This app-owned expression measures content; email scripts remain disabled.
+            // Give the web view its full height so the enclosing mail page is the only scroller.
             webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { [weak self] result, _ in
                 guard let number = result as? NSNumber else { return }
-                Task { @MainActor in self?.height.wrappedValue = min(max(number.doubleValue, 80), 2_000) }
+                Task { @MainActor in self?.height.wrappedValue = max(number.doubleValue, 80) }
             }
         }
     }
@@ -92,6 +92,37 @@ struct MailHTMLView: NSViewRepresentable {
 final class MeasuringWebView: WKWebView {
     var onWidthChange: (() -> Void)?
     private var measuredWidth: CGFloat = 0
+    private var scrollMonitor: Any?
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor); self.scrollMonitor = nil }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        // WebKit's internal scroll view otherwise catches wheel and trackpad events
+        // even when the entire email is already visible in the surrounding page.
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            let handled = MainActor.assumeIsolated {
+                guard let self, let window = self.window, event.window === window,
+                      let content = window.contentView,
+                      let hit = content.hitTest(content.convert(event.locationInWindow, from: nil)),
+                      hit === self || hit.isDescendant(of: self) else { return false }
+                var ancestor = self.superview
+                while let view = ancestor {
+                    if let scrollView = view as? NSScrollView {
+                        scrollView.scrollWheel(with: event)
+                        return true
+                    }
+                    ancestor = view.superview
+                }
+                return false
+            }
+            return handled ? nil : event
+        }
+    }
 
     override func layout() {
         super.layout()

@@ -24,7 +24,7 @@ struct MailBulkCommand: Identifiable {
     }
 }
 
-/// The round tick that stands in for a row's avatar while hovering, or once the row is picked.
+/// The round tick shown beside a row's avatar while hovering, or once the row is picked.
 struct PickCircle: View {
     var isPicked: Bool
     var size: CGFloat
