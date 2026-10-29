@@ -272,6 +272,24 @@ struct LifecycleRegressions {
         #expect(!session.canSend)
     }
 
+    @Test @MainActor func oversizedRecoveredInlineImagesCannotSendUntilRemoved() async throws {
+        let inline = OutgoingAttachment(name: "inline.png", mimeType: "image/png", data: Data(repeating: 1, count: 24_999_999), contentID: "inline")
+        let file = OutgoingAttachment(name: "file.txt", mimeType: "text/plain", data: Data([1, 2]))
+        let message = OutgoingMessage(to: ["reader@example.com"], body: "Image", attachments: [file], inlineImages: [inline])
+        let buffer = DraftSession.Buffer(message: message, to: "reader@example.com", cc: "", bcc: "")
+        let session = DraftSession(recovering: buffer, delay: .seconds(60))
+        var sent = false
+        session.configure(save: { $0 }, send: { _ in sent = true })
+        #expect(!session.canSend)
+        await #expect(throws: (any Error).self) { try await session.send() }
+        #expect(!sent)
+        session.message.attachments = []
+        #expect(session.canSend)
+        try await session.send()
+        #expect(sent)
+        session.cancel()
+    }
+
     @Test @MainActor func quitFlushesRecentEditsWithoutWaitingForTheDebounce() async throws {
         let context = try RegressionContext { _ in json("{}") }
         defer { context.cleanup() }

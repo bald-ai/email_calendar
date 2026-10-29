@@ -9,6 +9,54 @@ enum CalendarDates {
         return event.start < end && event.end > start
     }
 
+    struct EventLane {
+        let event: CalendarEvent
+        let lane: Int
+        let lanes: Int
+    }
+
+    /// The grids draw short events at a minimum height, so lane allocation must use
+    /// their visible height rather than letting adjacent short events cover each other.
+    static func eventLanes(_ events: [CalendarEvent], day: Date, calendar: Calendar) -> [EventLane] {
+        // Compact main grid: 17 px at 42 px/hour; overlay: 18 px at 46 px/hour.
+        // 27 minutes covers both minimum heights with room for their spacing.
+        let minimumVisibleDuration: TimeInterval = 27 * 60
+        let dayStart = calendar.startOfDay(for: day)
+        func visibleEnd(_ event: CalendarEvent) -> Date {
+            let visibleStart = max(event.start, dayStart)
+            return max(event.end, visibleStart.addingTimeInterval(minimumVisibleDuration))
+        }
+        let ordered = events.filter { !$0.isAllDay && overlaps($0, day: day, calendar: calendar) }
+            .sorted { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
+        var groups: [[CalendarEvent]] = []
+        var groupEnd = Date.distantPast
+        for event in ordered {
+            if event.start >= groupEnd {
+                groups.append([event])
+                groupEnd = visibleEnd(event)
+            } else {
+                groups[groups.count - 1].append(event)
+                groupEnd = max(groupEnd, visibleEnd(event))
+            }
+        }
+        return groups.flatMap { group in
+            var laneEnds: [Date] = []
+            var allocated: [(CalendarEvent, Int)] = []
+            for event in group {
+                let lane: Int
+                if let available = laneEnds.firstIndex(where: { $0 <= event.start }) {
+                    lane = available
+                    laneEnds[available] = visibleEnd(event)
+                } else {
+                    lane = laneEnds.count
+                    laneEnds.append(visibleEnd(event))
+                }
+                allocated.append((event, lane))
+            }
+            return allocated.map { EventLane(event: $0.0, lane: $0.1, lanes: laneEnds.count) }
+        }
+    }
+
     static func day(_ text: String, calendar: Calendar) -> Date? {
         let values = text.split(separator: "-", omittingEmptySubsequences: false)
         guard values.count == 3, values[0].count == 4, values[1].count == 2, values[2].count == 2,

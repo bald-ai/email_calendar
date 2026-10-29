@@ -88,36 +88,9 @@ enum CalendarGeometry {
     /// Allocate columns within each connected overlap group, keeping separate
     /// appointments full-width and simultaneous appointments individually clickable.
     static func placements(_ events: [CalendarEvent], day: Date) -> [Placement] {
-        let ordered = events.filter { !$0.isAllDay && overlaps($0, day: day) }
-            .sorted { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
-        var groups: [[CalendarEvent]] = []
-        var groupEnd = Date.distantPast
-        for event in ordered {
-            if event.start >= groupEnd {
-                groups.append([event])
-                groupEnd = event.end
-            } else {
-                groups[groups.count - 1].append(event)
-                groupEnd = max(groupEnd, event.end)
-            }
-        }
-        return groups.flatMap { group in
-            var laneEnds: [Date] = []
-            var allocated: [(CalendarEvent, Int)] = []
-            for event in group {
-                let lane: Int
-                if let available = laneEnds.firstIndex(where: { $0 <= event.start }) {
-                    lane = available
-                    laneEnds[available] = event.end
-                } else {
-                    lane = laneEnds.count
-                    laneEnds.append(event.end)
-                }
-                allocated.append((event, lane))
-            }
-            return allocated.map { event, lane in
-                Placement(event: event, start: minutes(event.start, on: day), end: minutes(event.end, on: day), lane: lane, lanes: laneEnds.count)
-            }
+        CalendarDates.eventLanes(events, day: day, calendar: calendar).map { item in
+            Placement(event: item.event, start: minutes(item.event.start, on: day), end: minutes(item.event.end, on: day),
+                      lane: item.lane, lanes: item.lanes)
         }
     }
 }

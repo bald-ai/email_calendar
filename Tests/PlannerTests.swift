@@ -64,6 +64,29 @@ struct PlannerTests {
         #expect(snapshot.doneTodos.map(\.title) == ["Done late", "Done early"])
     }
 
+    @Test func shortAndZeroLengthEventsHaveSeparateVisibleLanes() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let day = calendar.date(from: DateComponents(year: 2027, month: 2, day: 1))!
+        func event(_ id: String, _ start: Double, _ duration: Double) -> CalendarEvent {
+            CalendarEvent(id: id, calendarID: "c", accountID: "a", title: id,
+                          start: day.addingTimeInterval(start * 60), end: day.addingTimeInterval((start + duration) * 60))
+        }
+        let events = [event("zero", 0, 0), event("long", 0, 60), event("short", 15, 5), event("next", 21, 10), event("separate", 90, 30)]
+        let lanes = CalendarDates.eventLanes(events, day: day, calendar: calendar)
+        let byID = Dictionary(uniqueKeysWithValues: lanes.map { ($0.event.id, $0) })
+        #expect(byID["zero"]?.lane != byID["long"]?.lane)
+        #expect(byID["short"]?.lane != byID["next"]?.lane)
+        #expect(byID["separate"]?.lanes == 1)
+        #expect(CalendarDates.eventLanes([event("midnight", 0, 0)], day: calendar.date(byAdding: .day, value: -1, to: day)!, calendar: calendar).isEmpty)
+        // A chip that began yesterday still has a minimum visible height today.
+        let crossing = event("crossing", -60, 65)
+        let shortlyAfter = event("after midnight", 6, 30)
+        let midnight = CalendarDates.eventLanes([crossing, shortlyAfter], day: day, calendar: calendar)
+        #expect(midnight.count == 2 && midnight[0].lane != midnight[1].lane)
+        #expect(midnight.allSatisfy { $0.lanes == 2 })
+    }
+
     @Test func agendaGroupsSevenDaysWithAllDayFirstAndSkipsCancelled() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Europe/Prague")!

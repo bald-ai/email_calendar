@@ -291,7 +291,7 @@ struct MailComposerView: View {
         }
     }
 
-    private static let sizeLimit = 25_000_000
+    private static let sizeLimit = DraftSession.attachmentSizeLimit
     private static func size(_ bytes: Int) -> String { ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
 
     private func addAttachments(_ urls: [URL]) {

@@ -251,8 +251,9 @@ actor CalendarService {
                     try await self.removeCached(id: event.id, seriesID: scope == .allEvents ? event.recurringEventID : nil,
                                                 calendarID: sourceCalendarID, accountID: event.accountID)
                 }
-                if raw.recurrence?.isEmpty == false {
-                    // Google returns the master; fetch expanded instances before publishing the change.
+                if raw.recurrence?.isEmpty == false || event.recurringEventID != nil {
+                    // Edits to one occurrence can also change its siblings’ ETags on Google.
+                    // Refresh expanded instances before publishing the change.
                     try await self.refreshKnownRanges(calendarID: event.calendarID, accountID: event.accountID)
                     if let updated = try await self.cachedEvents(accountID: event.accountID, visibleOnly: false).first(where: {
                         $0.calendarID == event.calendarID && $0.id == event.id

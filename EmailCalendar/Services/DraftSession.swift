@@ -67,7 +67,11 @@ final class DraftSession {
         return value
     }
 
-    var canSend: Bool { MIMEComposer.hasValidRecipients(outgoing) }
+    static let attachmentSizeLimit = 25_000_000
+    var canSend: Bool {
+        MIMEComposer.hasValidRecipients(outgoing) &&
+            (sendNeedsVerification || outgoing.totalAttachmentBytes <= Self.attachmentSizeLimit)
+    }
 
     func configure(save: @escaping @MainActor @Sendable (OutgoingMessage) async throws -> OutgoingMessage,
                    send: @escaping @MainActor @Sendable (OutgoingMessage) async throws -> Void) {
@@ -131,6 +135,9 @@ final class DraftSession {
             if let saving { _ = try await saving.value }
             try Task.checkCancellation()
             guard !isCancelled else { throw CancellationError() }
+            guard sendNeedsVerification || outgoing.totalAttachmentBytes <= Self.attachmentSizeLimit else {
+                throw SessionError.attachmentsTooLarge
+            }
             do { try await sender(outgoing) }
             catch {
                 if error is MailDeliveryUncertainError { sendNeedsVerification = true }
@@ -153,8 +160,13 @@ final class DraftSession {
     }
 
     private enum SessionError: LocalizedError {
-        case notConfigured
-        var errorDescription: String? { "The draft is not ready to save to Gmail." }
+        case notConfigured, attachmentsTooLarge
+        var errorDescription: String? {
+            switch self {
+            case .notConfigured: "The draft is not ready to save to Gmail."
+            case .attachmentsTooLarge: "Images and attachments must total no more than 25 MB."
+            }
+        }
     }
 
     /// For Discard: no more autosaves, but a save already under way finishes so its draft ID is known.

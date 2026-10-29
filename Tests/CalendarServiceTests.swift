@@ -269,6 +269,7 @@ struct CalendarServiceTests {
             case 4, 5: return (200, master)
             case 6: return (200, "{\"items\":[\(updatedInstance)],\"nextSyncToken\":\"range-token\"}")
             case 7: return (200, updatedInstance)
+            case 8: return (200, "{\"items\":[\(updatedInstance)]}")
             default: return (400, #"{"error":{"message":"Unexpected recurrence request"}}"#)
             }
         }
@@ -296,7 +297,40 @@ struct CalendarServiceTests {
         #expect(requests[4].value(forHTTPHeaderField: "If-Match") == "master-etag")
         #expect(requests[6].url!.path.hasSuffix("/\(instance.id)"))
         #expect(try body(requests[6])["recurrence"] == nil)
-        #expect(requests[7].url!.path.hasSuffix("/weekly"))
+        #expect(requests[7].url!.path.hasSuffix("/events"))
+        #expect(requests[8].url!.path.hasSuffix("/weekly"))
+    }
+
+    @Test("A single occurrence edit refreshes sibling versions before a series edit")
+    func singleEditRefreshesSiblingETags() async throws {
+        let second = Self.instanceJSON.replacingOccurrences(of: "weekly_20261002T120000Z", with: "weekly_20261009T120000Z")
+            .replacingOccurrences(of: "2026-10-02", with: "2026-10-09")
+        let refreshedSecond = second.replacingOccurrences(of: "version-1", with: "version-2")
+        let master = #"{"id":"weekly","summary":"Planning","start":{"dateTime":"2026-10-02T12:00:00Z","timeZone":"UTC"},"end":{"dateTime":"2026-10-02T12:30:00Z","timeZone":"UTC"},"recurrence":["RRULE:FREQ=WEEKLY"],"etag":"master-etag"}"#
+        let fixture = CalendarHTTPFixture { request, number in
+            switch number {
+            case 1: return (200, Self.calendarsJSON)
+            case 2: return (200, "{\"items\":[\(Self.instanceJSON),\(second)],\"nextSyncToken\":\"first\"}")
+            case 3: return (200, Self.instanceJSON)
+            case 4: return (200, "{\"items\":[\(Self.instanceJSON),\(refreshedSecond)]}")
+            case 5: return (200, refreshedSecond)
+            case 6, 7: return (200, master)
+            case 8: return (200, "{\"items\":[\(Self.instanceJSON),\(refreshedSecond)]}")
+            default: return (400, #"{"error":{"message":"Unexpected request"}}"#)
+            }
+        }
+        let (service, _, token, directory) = try context(fixture)
+        defer { cleanup(token: token, directory: directory) }
+        try await service.sync(accountID: "owner")
+        let initial = try await service.cachedEvents(accountID: "owner")
+        var first = try #require(initial.first)
+        first.title = "Changed occurrence"
+        _ = try await service.update(first, scope: .thisEvent)
+        let refreshed = try #require(try await service.cachedEvents(accountID: "owner").last)
+        #expect(refreshed.etag == "version-2")
+        var all = refreshed; all.title = "Changed series"
+        _ = try await service.update(all, scope: .allEvents, originalEvent: refreshed)
+        #expect(fixture.requests().count == 8)
     }
 
     @Test("Sign-out drains the actual network task before another account can use the service")
