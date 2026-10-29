@@ -46,6 +46,21 @@ struct MailSnapshotOrder {
     }
 }
 
+/// Retain search results removed by a label change so Undo can put them back if Gmail matches again.
+struct SearchResultRecovery {
+    private(set) var removedIDs: Set<String> = []
+
+    mutating func reset() { removedIDs.removeAll() }
+    mutating func removed(_ id: String) { removedIDs.insert(id) }
+    mutating func restored(_ id: String) { removedIDs.remove(id) }
+
+    func candidates(visible: [MailThread], cached: [MailThread], previous: [String: Set<String>]) -> [MailThread] {
+        let visibleIDs = Set(visible.map(\.id))
+        return (visible + cached.filter { removedIDs.contains($0.id) && !visibleIDs.contains($0.id) })
+            .filter { previous[$0.id] != $0.labels }
+    }
+}
+
 private struct ImagePreference: Codable, Sendable { var sender: String }
 
 struct MailSearchPage: Sendable {

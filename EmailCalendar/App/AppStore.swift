@@ -117,6 +117,7 @@ final class AppStore {
     @ObservationIgnored private var replacingComposition = false
     @ObservationIgnored private var mailSnapshotOrder = MailSnapshotOrder()
     private var senderRuleIndex = SenderRuleIndex()
+    @ObservationIgnored private var searchRecovery = SearchResultRecovery()
     @ObservationIgnored private var searchGeneration = 0
     @ObservationIgnored private var searchTask: Task<MailSearchPage, Error>?
     @ObservationIgnored var openWindow: (() -> Void)?
@@ -332,6 +333,7 @@ final class AppStore {
 
     func search(_ query: String) async {
         searchGeneration += 1
+        searchRecovery.reset()
         let generation = searchGeneration
         searchTask?.cancel(); searchTask = nil
         searchNextPageToken = nil; isSearching = false
@@ -1081,16 +1083,24 @@ final class AppStore {
     private func loadMailCache(accountID: String) async throws {
         guard account?.id == accountID else { return }
         if let mail {
-            let before = Dictionary(threads.map { ($0.id, $0.labels) }, uniquingKeysWith: { _, latest in latest })
+            let before = Dictionary(cachedThreads.map { ($0.id, $0.labels) }, uniquingKeysWith: { _, latest in latest })
             let snapshot = try await mail.cached(accountID: accountID)
             if account?.id == accountID { apply(snapshot) }
             let query = searchQuery, generation = searchGeneration
             if !query.isEmpty, let account, account.id == accountID {
-                let changed = threads.filter { before[$0.id] != $0.labels }
+                let changed = searchRecovery.candidates(visible: threads, cached: cachedThreads, previous: before)
                 for thread in changed {
                     let matches = try await mail.matchesSearch(thread, query: searchScoped(query), includeSpamTrash: searchIncludesSpam, account: account)
                     guard generation == searchGeneration, self.account?.id == accountID else { return }
-                    if !matches { threads.removeAll { $0.id == thread.id } }
+                    if matches {
+                        if searchRecovery.removedIDs.contains(thread.id), !threads.contains(where: { $0.id == thread.id }) {
+                            threads.append(thread)
+                        }
+                        searchRecovery.restored(thread.id)
+                    } else {
+                        if threads.contains(where: { $0.id == thread.id }) { searchRecovery.removed(thread.id) }
+                        threads.removeAll { $0.id == thread.id }
+                    }
                 }
             }
         }

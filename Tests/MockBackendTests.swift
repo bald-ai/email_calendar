@@ -7,6 +7,45 @@ import FoundationNetworking
 
 /// Runs the real mail and calendar services end to end against the test-only mock backend.
 final class MockBackendTests: XCTestCase, @unchecked Sendable {
+    func testSearchResultCanReturnAfterTrashUndoWithoutResettingOtherResults() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let backend = MockGoogleBackend(fileURL: directory.appendingPathComponent("google.json"))
+        let api = GoogleAPI(auth: MockTokenProvider(), session: MockGoogleBackendURLProtocol.session(backend: backend))
+        let store = try LocalStore(url: directory.appendingPathComponent("cache.sqlite"))
+        let mail = MailService(api: api, store: store)
+        let account = Account(id: MockGoogleBackend.accountEmail, email: MockGoogleBackend.accountEmail)
+        _ = try await mail.sync(account: account)
+        let page = try await mail.searchPage(query: "in:inbox", account: account)
+        let original = try XCTUnwrap(page.threads.first { $0.id == "t-bank" })
+        let other = try XCTUnwrap(page.threads.first { $0.id == "t-mom" })
+        var visible = [original, other]
+        var recovery = SearchResultRecovery()
+        var before = Dictionary(visible.map { ($0.id, $0.labels) }, uniquingKeysWith: { _, latest in latest })
+        let token = try await mail.trash(threadID: original.id, account: account)
+        var cached = try await mail.cached(accountID: account.id).threads
+        visible = cached.filter { $0.id == original.id || $0.id == other.id }
+        let changed = recovery.candidates(visible: visible, cached: cached, previous: before)
+        XCTAssertEqual(changed.map(\.id), [original.id])
+        let removed = try XCTUnwrap(changed.first)
+        let afterTrash = try await mail.searchPage(query: "in:inbox", account: account)
+        XCTAssertFalse(afterTrash.threads.contains { $0.id == removed.id })
+        recovery.removed(removed.id); visible.removeAll { $0.id == removed.id }
+        before = Dictionary(cached.map { ($0.id, $0.labels) }, uniquingKeysWith: { _, latest in latest })
+        try await mail.undo(tokenID: token.id, account: account)
+        cached = try await mail.cached(accountID: account.id).threads
+        let restored = try XCTUnwrap(recovery.candidates(visible: visible, cached: cached, previous: before).first)
+        let afterUndo = try await mail.searchPage(query: "in:inbox", account: account)
+        XCTAssertTrue(afterUndo.threads.contains { $0.id == restored.id })
+        XCTAssertEqual(restored.id, original.id)
+        XCTAssertEqual(visible.map(\.id), [other.id])
+        XCTAssertTrue(restored.labels.contains("INBOX"))
+        recovery.restored(restored.id)
+        XCTAssertTrue(recovery.removedIDs.isEmpty)
+        recovery.removed(original.id); recovery.reset()
+        XCTAssertTrue(recovery.candidates(visible: [], cached: cached, previous: before).isEmpty, "Old results do not leak into a new query")
+    }
+
     func testDiscardRemovesTheDraftButKeepsTheConversation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
