@@ -77,9 +77,9 @@ private struct CredentialRow: View {
 
     private var title: String {
         switch credential {
-        case .anthropicKey: "Anthropic API key"
+        case .anthropicKey: "Anthropic API key (backup)"
         case .anthropicWorkspace: "Anthropic workspace ID"
-        case .openAIKey: "OpenAI API key (backup)"
+        case .openAIKey: "OpenAI API key"
         }
     }
 }

@@ -1,0 +1,7 @@
+{
+  "kind": "benchmark-analysis-checksums",
+  "sha256": {
+    "scripts/audit_event_benchmark.py": "0a916d3bd1024dec9c81bfd508c66e6e53a113dc158d6310ece333b5a97389c0",
+    "scripts/summarize_event_benchmark.py": "bbf8421067c693bcd37f65809e4b2b9172dea9a2a7e7d0b7e5c20b458d37001a"
+  }
+}

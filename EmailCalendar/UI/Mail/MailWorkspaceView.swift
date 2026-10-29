@@ -360,6 +360,11 @@ private struct MailboxPage: View {
     var compose: () -> Void
     var act: (MailRootView.ThreadAction, [MailThread]) -> Void
     @Binding var showsScreenedSenders: Bool
+    /// The new mail "Mark all as seen" asks about, fixed when asked so mail arriving under the alert stays new.
+    @State private var seenCandidates: [MailThread] = []
+    @State private var confirmsMarkAllSeen = false
+    /// "Mark all as seen" shows only while the pointer is over the NEW FOR YOU line.
+    @State private var hoversNewForYou = false
 
     private var isSearch: Bool { !store.searchQuery.isEmpty }
     private var picked: [MailThread] { threads.filter { store.selection.contains($0.id) } }
@@ -453,9 +458,24 @@ private struct MailboxPage: View {
             let fresh = threads.filter { $0.unread || $0.id == store.openedUnreadID }
             let seen = threads.filter { !$0.unread && $0.id != store.openedUnreadID }
             if !fresh.isEmpty {
+                let unread = fresh.filter(\.unread)
                 SectionRule(title: "NEW FOR YOU") {
+                    if hoversNewForYou && !unread.isEmpty {
+                        Button { seenCandidates = unread; confirmsMarkAllSeen = true } label: { Label("Mark all as seen", systemImage: "eye") }
+                            .buttonStyle(OutlinePillStyle()).help("Move every new email to Previously Seen")
+                            .transition(.opacity)
+                    }
+                } accessory: {
                     Button { store.powerThroughNew() } label: { Label("Power Through New", systemImage: "bolt.fill") }
                         .buttonStyle(OutlinePillStyle()).help("Read all new mail on one page (p)")
+                }
+                .onHover { hoversNewForYou = $0 }
+                .animation(.easeOut(duration: 0.15), value: hoversNewForYou)
+                .alert(seenCandidates.count == 1 ? "Are you sure you want to mark 1 email as seen?"
+                       : "Are you sure you want to mark \(seenCandidates.count) emails as seen?",
+                       isPresented: $confirmsMarkAllSeen, presenting: seenCandidates) { threads in
+                    Button("Cancel", role: .cancel) {}
+                    Button("OK") { Task { await store.markAllSeen(threads) } }
                 }
                 rows(fresh)
             }
@@ -531,18 +551,22 @@ private struct MailboxPage: View {
     }
 }
 
-private struct SectionRule<Accessory: View>: View {
+/// A section title, then a rule across the page; `leading` sits beside the title, `accessory` at the far end.
+private struct SectionRule<Leading: View, Accessory: View>: View {
     var title: String
+    @ViewBuilder var leading: Leading
     @ViewBuilder var accessory: Accessory
 
-    init(title: String, @ViewBuilder accessory: () -> Accessory = { EmptyView() }) {
+    init(title: String, @ViewBuilder leading: () -> Leading = { EmptyView() }, @ViewBuilder accessory: () -> Accessory = { EmptyView() }) {
         self.title = title
+        self.leading = leading()
         self.accessory = accessory()
     }
 
     var body: some View {
         HStack(spacing: 12) {
             Text(title).font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.text.opacity(0.9)).fixedSize()
+            leading
             Rectangle().fill(Theme.rule).frame(height: 1)
             accessory
         }.padding(.horizontal, 12).padding(.bottom, 8)

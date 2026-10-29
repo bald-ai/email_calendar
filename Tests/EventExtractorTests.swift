@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import CryptoKit
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -134,10 +135,11 @@ final class EventExtractorTests: XCTestCase {
     }
 }
 
-/// Live check against OpenAI with the screenshots in Fixtures/EventImages. Skipped unless EC_LIVE_AI=1.
+/// Live end-to-end extraction benchmark using the production prompt/parser. Skipped unless EC_LIVE_AI=1.
 ///     EC_LIVE_AI=1 OPENAI_API_KEY=… [EC_AI_MODEL=gpt-6.1-sol] [EC_AI_REASONING=medium] [EC_AI_REPEATS=1] swift test --filter LiveEventExtraction
 final class LiveEventExtractionTests: XCTestCase {
     struct Suite: Decodable {
+        var version: String
         var now: String
         var timeZone: String
         var calendars: [String]?
@@ -147,6 +149,11 @@ final class LiveEventExtractionTests: XCTestCase {
         var tier: Int
         var id: String
         var image: String?
+        var images: [String]?
+        var now: String?
+        var timeZone: String?
+        var calendars: [String]?
+        var imageNames: [String] { (image.map { [$0] } ?? []) + (images ?? []) }
         var text: String?
         var note: String?
         var warn: Bool?
@@ -164,6 +171,12 @@ final class LiveEventExtractionTests: XCTestCase {
         var once: Bool?
         var calendar: String?
         var alarm: Int?
+        var durationMinutes: Int?
+        var titleAny: [String]?
+        var locationContains: [String]?
+        var notesContains: [String]?
+        var warningAny: [String]?
+        var sourceZone: String?
     }
     struct Outcome: Sendable, Encodable {
         var tier: Int
@@ -174,19 +187,83 @@ final class LiveEventExtractionTests: XCTestCase {
         var detail: String
         var seconds: Double
         var usage: EventExtraction.Usage
-        enum CodingKeys: String, CodingKey { case tier, id, passed, detail, seconds, cost, servedModel }
+        var errorKind: String?
+        var attempt = 1
+        var actual: [Snapshot] = []
+        var inputTokens: Int { usage.inputTokens }
+        var cachedTokens: Int { usage.cachedTokens }
+        var outputTokens: Int { usage.outputTokens }
+        var reasoningTokens: Int { usage.reasoningTokens }
+        enum CodingKeys: String, CodingKey { case tier, id, passed, detail, seconds, cost, servedModel, attempt, actual, usage, errorKind }
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(tier, forKey: .tier); try c.encode(id, forKey: .id)
+            try c.encode(passed, forKey: .passed); try c.encode(detail, forKey: .detail)
+            try c.encode(seconds, forKey: .seconds); try c.encode(cost, forKey: .cost)
+            try c.encodeIfPresent(servedModel, forKey: .servedModel)
+            try c.encodeIfPresent(errorKind, forKey: .errorKind)
+            try c.encode(attempt, forKey: .attempt); try c.encode(actual, forKey: .actual)
+            try c.encode(["input": inputTokens, "cached": cachedTokens, "output": outputTokens,
+                          "reasoning": reasoningTokens], forKey: .usage)
+        }
+    }
+    struct Snapshot: Sendable, Encodable {
+        var title, start, end, location, notes: String
+        var allDay: Bool
+        var warnings, recurrence: [String]
+        var calendar, sourceZone: String?
+        var alarm: Int?
+        init(_ e: ExtractedEvent) {
+            title = e.title; start = e.start.ISO8601Format(); end = e.end.ISO8601Format()
+            location = e.location; notes = e.notes; allDay = e.isAllDay
+            warnings = e.warnings; recurrence = e.recurrence; calendar = e.calendar
+            sourceZone = e.sourceTimeZone?.identifier; alarm = e.alarmMinutesBefore
+        }
+    }
+    struct Report: Encodable {
+        var schemaVersion = 2
+        var suiteVersion, fingerprint, model, reasoning, serviceTier, createdAt: String
+        var repeats, parallelism: Int
+        var caseIDs: [String]
+        var outcomes: [Outcome]
+    }
+    enum ConfigurationError: Error { case invalid(String) }
+
+    static func validate(_ suite: Suite, folder: URL) throws {
+        guard !suite.cases.isEmpty, Set(suite.cases.map(\.id)).count == suite.cases.count,
+              TimeZone(identifier: suite.timeZone) != nil else {
+            throw ConfigurationError.invalid("Empty suite, duplicate IDs or invalid time zone")
+        }
+        for test in suite.cases {
+            guard !(test.text ?? "").isEmpty || !test.imageNames.isEmpty,
+                  test.timeZone == nil || TimeZone(identifier: test.timeZone!) != nil else {
+                throw ConfigurationError.invalid("Invalid input/context: \(test.id)")
+            }
+            for name in test.imageNames {
+                guard !name.contains("/"), !(try Data(contentsOf: folder.appendingPathComponent(name))).isEmpty else {
+                    throw ConfigurationError.invalid("Missing image: \(name)")
+                }
+            }
+            for expected in test.expect {
+                guard !expected.start.isEmpty, expected.allDay != nil,
+                      expected.end != nil || expected.durationMinutes != nil else {
+                    throw ConfigurationError.invalid("Incomplete expected event: \(test.id)")
+                }
+            }
+        }
     }
 
     func testFixturesWithLiveModel() async throws {
         let environment = ProcessInfo.processInfo.environment
-        let model = environment["EC_AI_MODEL"] ?? "gpt-6.1-sol"
-        guard environment["EC_LIVE_AI"] == "1",
+        guard environment["EC_LIVE_AI"] == "1" else { throw XCTSkip("Live model benchmark is opt-in.") }
+        guard let model = environment["EC_AI_MODEL"], !model.isEmpty,
               let key = environment[model.hasPrefix("claude-") ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"], !key.isEmpty else {
-            throw XCTSkip("Set EC_LIVE_AI=1 and OPENAI_API_KEY (or ANTHROPIC_API_KEY for claude-…) to run the live extraction check.")
+            throw ConfigurationError.invalid("Choose EC_AI_MODEL and provide its API key")
         }
         let folder = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/EventImages")
         let casesFile = environment["EC_AI_CASES"].map { URL(fileURLWithPath: $0) } ?? folder.appendingPathComponent("cases.json")
         let suite = try JSONDecoder().decode(Suite.self, from: Data(contentsOf: casesFile))
+        try Self.validate(suite, folder: folder)
         let calendars = suite.calendars ?? []
         let zone = try XCTUnwrap(TimeZone(identifier: suite.timeZone))
         let now = EventExtractorTests.date(suite.now, in: zone)
@@ -194,25 +271,53 @@ final class LiveEventExtractionTests: XCTestCase {
         let extractor = EventExtractor(apiKey: key, settings: EventExtractorSettings(model: model, reasoning: reasoning,
                                                                                      serviceTier: environment["EC_AI_TIER"] ?? "default"),
                                        anthropicWorkspaceID: environment["ANTHROPIC_WORKSPACE_ID"])
-        let repeats = Int(environment["EC_AI_REPEATS"] ?? "1") ?? 1
+        guard let repeats = Int(environment["EC_AI_REPEATS"] ?? "3"), repeats > 0,
+              let parallelism = Int(environment["EC_AI_PARALLEL"] ?? "1"), parallelism > 0 else {
+            throw ConfigurationError.invalid("Repeats and parallelism must be positive integers")
+        }
         let only = environment["EC_AI_ONLY"].map { Set($0.split(separator: ",").map(String.init)) }
         let cases = suite.cases.filter { only?.contains($0.id) ?? true }
+        guard !cases.isEmpty, only == nil || only!.isSubset(of: Set(suite.cases.map(\.id))) else {
+            throw ConfigurationError.invalid("EC_AI_ONLY contains unknown IDs or selects no cases")
+        }
+        // Bind comparisons to exact fixtures AND production/scoring source, not just a date label.
+        var digest = SHA256()
+        for file in [casesFile] + Set(cases.flatMap(\.imageNames)).sorted().map({ folder.appendingPathComponent($0) })
+            + [URL(fileURLWithPath: #filePath), folder.deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent("EmailCalendar/Services/EventExtractor.swift")] {
+            digest.update(data: try Data(contentsOf: file))
+        }
+        let fingerprint = digest.finalize().map { String(format: "%02x", $0) }.joined()
 
         var outcomes: [Outcome] = []
         try await withThrowingTaskGroup(of: Outcome.self) { group in
-            var pending = (0..<repeats).flatMap { _ in cases }.makeIterator()
+            var pending = (1...repeats).flatMap { attempt in cases.map { (attempt, $0) } }.makeIterator()
             func next() -> Bool {
-                guard let test = pending.next() else { return false }
-                group.addTask { await Self.run(test, extractor: extractor, folder: folder, now: now, zone: zone, calendars: calendars) }
+                guard let (attempt, test) = pending.next() else { return false }
+                group.addTask {
+                    let contextZone = test.timeZone.flatMap(TimeZone.init(identifier:)) ?? zone
+                    let contextNow = test.now.map { EventExtractorTests.date($0, in: contextZone) } ?? now
+                    var outcome = await Self.run(test, extractor: extractor, folder: folder, now: contextNow,
+                                                 zone: contextZone, calendars: test.calendars ?? calendars)
+                    outcome.attempt = attempt
+                    return outcome
+                }
                 return true
             }
-            for _ in 0..<(Int(environment["EC_AI_PARALLEL"] ?? "4") ?? 4) where next() {}
+            for _ in 0..<parallelism where next() {}
             while let outcome = try await group.next() {
                 outcomes.append(outcome)
+                if let path = environment["EC_AI_PROGRESS"] {
+                    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                    var line = try encoder.encode(outcome); line.append(0x0a)
+                    if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: nil) }
+                    let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+                    try handle.seekToEnd(); try handle.write(contentsOf: line); try handle.close()
+                }
                 _ = next()
             }
         }
-        outcomes.sort { ($0.tier, $0.id) < ($1.tier, $1.id) }
+        outcomes.sort { ($0.tier, $0.id, $0.attempt) < ($1.tier, $1.id, $1.attempt) }
         let passed = outcomes.filter(\.passed).count
         let cost = outcomes.reduce(0) { $0 + $1.usage.estimatedCost }
         let seconds = outcomes.map(\.seconds).sorted()
@@ -230,39 +335,24 @@ final class LiveEventExtractionTests: XCTestCase {
         print(report)
         if let path = environment["EC_AI_REPORT"] { try report.write(toFile: path, atomically: true, encoding: .utf8) }
         if let path = environment["EC_AI_JSON"] {
-            try JSONEncoder().encode(outcomes).write(to: URL(fileURLWithPath: path))
+            let record = Report(suiteVersion: suite.version, fingerprint: fingerprint, model: model,
+                                reasoning: reasoning, serviceTier: extractor.settings.serviceTier,
+                                createdAt: Date.now.ISO8601Format(), repeats: repeats, parallelism: parallelism,
+                                caseIDs: cases.map(\.id).sorted(), outcomes: outcomes)
+            let url = URL(fileURLWithPath: path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(record).write(to: url)
         }
         XCTAssertEqual(passed, outcomes.count, "Some extractions were wrong; see the report above.")
     }
 
     private static func run(_ test: Case, extractor: EventExtractor, folder: URL, now: Date, zone: TimeZone, calendars: [String]) async -> Outcome {
-        let images = test.image.flatMap { try? Data(contentsOf: folder.appendingPathComponent($0)) }.map { [EventExtractor.Image(data: $0)] } ?? []
+        let started = Date.now
         do {
+            let images = try test.imageNames.map { EventExtractor.Image(data: try Data(contentsOf: folder.appendingPathComponent($0))) }
             let result = try await extractor.extract(text: test.text ?? "", images: images, now: now, timeZone: zone, calendars: calendars)
-            var problems: [String] = []
-            var remaining = result.events
-            for expected in test.expect {
-                let starts = expected.start.map { EventExtractorTests.date($0, in: zone) }
-                guard let index = remaining.firstIndex(where: { starts.contains($0.start) }) else {
-                    problems.append("missing start \(expected.start.joined(separator: " or "))"); continue
-                }
-                let event = remaining.remove(at: index)
-                if let end = expected.end, event.end != EventExtractorTests.date(end, in: zone) {
-                    problems.append("\(event.title): end \(format(event.end, zone)) ≠ \(end)")
-                }
-                if let allDay = expected.allDay, event.isAllDay != allDay { problems.append("\(event.title): allDay \(event.isAllDay)") }
-                if test.warn == true, event.warnings.isEmpty { problems.append("\(event.title): no warning for an ambiguous source") }
-                let rule = event.recurrence.first ?? ""
-                if let parts = expected.rrule, !parts.allSatisfy(rule.contains) { problems.append("\(event.title): repeat “\(rule)” lacks \(parts)") }
-                if let any = expected.rruleAny, !any.contains(where: rule.contains) { problems.append("\(event.title): repeat “\(rule)” lacks one of \(any)") }
-                if expected.once == true, !rule.isEmpty { problems.append("\(event.title): should not repeat (\(rule))") }
-                if expected.rrule == nil, expected.rruleAny == nil, expected.once == nil, !rule.isEmpty { problems.append("\(event.title): unexpected repeat \(rule)") }
-                if let name = expected.calendar, event.calendar != name { problems.append("\(event.title): calendar \(event.calendar ?? "none") ≠ \(name)") }
-                if expected.calendar == nil, let name = event.calendar { problems.append("\(event.title): unasked calendar \(name)") }
-                if let minutes = expected.alarm, event.alarmMinutesBefore != minutes { problems.append("\(event.title): alarm \(event.alarmMinutesBefore.map(String.init) ?? "none") ≠ \(minutes)") }
-                if expected.alarm == nil, let minutes = event.alarmMinutesBefore { problems.append("\(event.title): unasked alarm \(minutes) min") }
-            }
-            problems += remaining.map { "extra \($0.title) @ \(format($0.start, zone))" }
+            let problems = grade(test, events: result.events, message: result.message, zone: zone)
             let summary = result.events.map { event in
                 let extras = [event.sourceTimeText.map { " 🌐 \($0)" }, event.zoneNote.map { " (\($0))" },
                               event.recurrence.first.map { " ↻ \($0.dropFirst(6))" }, event.calendar.map { " 📅 \($0)" },
@@ -275,10 +365,88 @@ final class LiveEventExtractionTests: XCTestCase {
                 : problems.joined(separator: "; ") + " ⟵ got: " + (summary.isEmpty ? "nothing (\(result.message ?? "no message"))" : summary)
             let fallback = result.servedModel.flatMap { $0 == extractor.settings.model ? nil : " [answered by \($0)]" } ?? ""
             return Outcome(tier: test.tier, id: test.id, passed: problems.isEmpty, cost: result.usage.estimatedCost,
-                           servedModel: result.servedModel, detail: detail + fallback, seconds: result.seconds, usage: result.usage)
+                           servedModel: result.servedModel, detail: detail + fallback, seconds: result.seconds, usage: result.usage, actual: result.events.map(Snapshot.init))
         } catch {
-            return Outcome(tier: test.tier, id: test.id, passed: false, detail: "error: \(error.localizedDescription)", seconds: 0, usage: .init())
+            let kind: String
+            switch error {
+            case EventExtractorError.http: kind = "api"
+            case EventExtractorError.incomplete: kind = "truncated"
+            case EventExtractorError.refused: kind = "refused"
+            case EventExtractorError.invalidOutput: kind = "invalid_output"
+            default: kind = "transport_or_configuration"
+            }
+            let detail = error.localizedDescription.replacingOccurrences(of: extractor.apiKey, with: "[redacted]")
+            return Outcome(tier: test.tier, id: test.id, passed: false, detail: "error: \(detail)",
+                           seconds: Date.now.timeIntervalSince(started), usage: .init(), errorKind: kind)
         }
+    }
+
+    static func contains(_ text: String, _ fragment: String) -> Bool {
+        text.range(of: fragment, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    }
+    static func ruleHas(_ rule: String, _ expected: String) -> Bool {
+        let wanted = expected.uppercased().split(separator: "=", maxSplits: 1).map(String.init)
+        guard wanted.count == 2 else { return false }
+        let parts = rule.uppercased().replacingOccurrences(of: "RRULE:", with: "").split(separator: ";")
+        return parts.contains { part in
+            let pair = part.split(separator: "=", maxSplits: 1).map(String.init)
+            return pair.count == 2 && pair[0] == wanted[0]
+                && Set(pair[1].split(separator: ",")) == Set(wanted[1].split(separator: ","))
+        }
+    }
+    static func fieldProblems(_ expected: Expected, event: ExtractedEvent, zone: TimeZone) -> [String] {
+        var problems: [String] = []
+        if event.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || event.title == "Untitled event" {
+            problems.append("empty/generic title")
+        }
+        if let minutes = expected.durationMinutes, abs(event.end.timeIntervalSince(event.start) - Double(minutes * 60)) > 0.5 {
+            problems.append("\(event.title): wrong duration")
+        }
+        for (label, text, fragments) in [("location", event.location, expected.locationContains), ("notes", event.notes, expected.notesContains)] {
+            if let fragments, !fragments.allSatisfy({ contains(text, $0) }) { problems.append("\(event.title): missing \(label) details \(fragments)") }
+        }
+        if let alternatives = expected.titleAny, !alternatives.contains(where: { contains(event.title, $0) }) { problems.append("wrong title: \(event.title)") }
+        if let alternatives = expected.warningAny, !alternatives.contains(where: { contains(event.warnings.joined(separator: " "), $0) }) {
+            problems.append("\(event.title): missing relevant warning")
+        }
+        if let zone = expected.sourceZone, event.sourceTimeZone?.identifier != zone { problems.append("\(event.title): wrong source zone") }
+        if let end = expected.end, event.end != EventExtractorTests.date(end, in: zone) {
+            problems.append("\(event.title): end \(format(event.end, zone)) ≠ \(end)")
+        }
+        if let allDay = expected.allDay, event.isAllDay != allDay { problems.append("\(event.title): allDay \(event.isAllDay)") }
+        let rule = event.recurrence.first ?? ""
+        if let parts = expected.rrule, !parts.allSatisfy({ ruleHas(rule, $0) }) { problems.append("\(event.title): repeat “\(rule)” lacks \(parts)") }
+        if let any = expected.rruleAny, !any.contains(where: { ruleHas(rule, $0) }) { problems.append("\(event.title): repeat “\(rule)” lacks one of \(any)") }
+        if expected.once == true, !rule.isEmpty { problems.append("\(event.title): should not repeat (\(rule))") }
+        if expected.rrule == nil, expected.rruleAny == nil, expected.once == nil, !rule.isEmpty { problems.append("\(event.title): unexpected repeat \(rule)") }
+        if let name = expected.calendar, event.calendar != name { problems.append("\(event.title): calendar \(event.calendar ?? "none") ≠ \(name)") }
+        if expected.calendar == nil, let name = event.calendar { problems.append("\(event.title): unasked calendar \(name)") }
+        if let minutes = expected.alarm, event.alarmMinutesBefore != minutes { problems.append("\(event.title): alarm \(event.alarmMinutesBefore.map(String.init) ?? "none") ≠ \(minutes)") }
+        if expected.alarm == nil, let minutes = event.alarmMinutesBefore { problems.append("\(event.title): unasked alarm \(minutes) min") }
+        return problems
+    }
+    static func grade(_ test: Case, events: [ExtractedEvent], message: String?, zone: TimeZone) -> [String] {
+        var problems: [String] = []
+        var remaining = events
+        for expected in test.expect {
+            let starts = expected.start.map { EventExtractorTests.date($0, in: zone) }
+            let candidates = remaining.indices.filter { starts.contains(remaining[$0].start) }
+            guard let index = candidates.min(by: {
+                fieldProblems(expected, event: remaining[$0], zone: zone).count < fieldProblems(expected, event: remaining[$1], zone: zone).count
+            }) else {
+                problems.append("missing start \(expected.start.joined(separator: " or "))"); continue
+            }
+            let event = remaining.remove(at: index)
+            problems += fieldProblems(expected, event: event, zone: zone)
+            if test.warn == true, event.warnings.isEmpty { problems.append("\(event.title): no warning for an ambiguous source") }
+
+        }
+        problems += remaining.map { "extra \($0.title) @ \(format($0.start, zone))" }
+
+        if test.expect.isEmpty && (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            problems.append("No explanation for no-event input")
+        }
+        return problems
     }
 
     private static func format(_ date: Date, _ zone: TimeZone) -> String {
@@ -286,5 +454,86 @@ final class LiveEventExtractionTests: XCTestCase {
         formatter.timeZone = zone
         formatter.dateFormat = "MMM d HH:mm"
         return formatter.string(from: date)
+    }
+}
+
+/// The scorer must fail bad outputs without making any model calls.
+final class EventBenchmarkValidationTests: XCTestCase {
+    typealias Benchmark = LiveEventExtractionTests
+    let zone = TimeZone(identifier: "Europe/Prague")!
+    var folder: URL { URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/EventImages") }
+    func suite() throws -> Benchmark.Suite {
+        try JSONDecoder().decode(Benchmark.Suite.self, from: Data(contentsOf: folder.appendingPathComponent("cases.json")))
+    }
+    func fixture(_ id: String) throws -> Benchmark.Case { try XCTUnwrap(try suite().cases.first { $0.id == id }) }
+    func event(_ expected: Benchmark.Expected, title: String = "Appointment") -> ExtractedEvent {
+        let start = EventExtractorTests.date(expected.start[0], in: zone)
+        return ExtractedEvent(title: title, start: start,
+                              end: expected.end.map { EventExtractorTests.date($0, in: zone) }
+                                ?? start.addingTimeInterval(Double((expected.durationMinutes ?? 60) * 60)),
+                              isAllDay: expected.allDay ?? false, location: "", notes: "", sourceTimeZone: nil,
+                              confidence: "high", warnings: [])
+    }
+    func testAllFixturesHaveInputsAndCompleteExpectations() throws {
+        let suite = try suite()
+        try Benchmark.validate(suite, folder: folder)
+        for test in suite.cases {
+            let contextZone = test.timeZone.flatMap(TimeZone.init(identifier:)) ?? zone
+            for e in test.expect {
+                for start in e.start {
+                    let date = EventExtractorTests.date(start, in: contextZone)
+                    let formatter = DateFormatter(); formatter.timeZone = contextZone; formatter.dateFormat = "yyyy-MM-dd'T'HH:mm"
+                    XCTAssertEqual(formatter.string(from: date), start, test.id)
+                    if let end = e.end { XCTAssertGreaterThan(EventExtractorTests.date(end, in: contextZone), date, test.id) }
+                }
+            }
+        }
+    }
+    func testRecurrenceTokensCannotPassByPrefixOrDaySubstring() {
+        XCTAssertFalse(Benchmark.ruleHas("RRULE:FREQ=WEEKLY;COUNT=80", "COUNT=8"))
+        XCTAssertFalse(Benchmark.ruleHas("RRULE:FREQ=WEEKLY;UNTIL=20261209", "UNTIL=20261208"))
+        XCTAssertFalse(Benchmark.ruleHas("RRULE:FREQ=WEEKLY;BYDAY=TU,TH", "BYDAY=TU"))
+        XCTAssertTrue(Benchmark.ruleHas("RRULE:FREQ=WEEKLY;BYDAY=FR,MO,TU,WE,TH", "BYDAY=MO,TU,WE,TH,FR"))
+    }
+    func testRejectsWrongDurationAllDayAndUnrequestedControls() throws {
+        let test = try fixture("text_iso")
+        var output = event(test.expect[0], title: "Board meeting")
+        XCTAssertTrue(Benchmark.grade(test, events: [output], message: nil, zone: zone).isEmpty)
+        output.end = output.start.addingTimeInterval(60)
+        output.isAllDay = true; output.calendar = "Work"; output.alarmMinutesBefore = 0
+        XCTAssertEqual(Benchmark.grade(test, events: [output], message: nil, zone: zone).count, 4)
+    }
+    func testUnrelatedWarningDoesNotSatisfyAmbiguity() throws {
+        let test = try fixture("text_cst_ambiguous")
+        var output = event(test.expect[0]); output.warnings = ["This is in the past."]
+        XCTAssertFalse(Benchmark.grade(test, events: [output], message: nil, zone: zone).isEmpty)
+        output.warnings = ["CST can mean China or US Central; check the zone."]
+        XCTAssertTrue(Benchmark.grade(test, events: [output], message: nil, zone: zone).isEmpty)
+    }
+    func testSimultaneousEventsMatchIndependentOfOutputOrder() throws {
+        let test = try fixture("same_start_distinct_events")
+        var yoga = event(test.expect[0], title: "Yoga"); yoga.location = "Studio A"
+        var piano = event(test.expect[1], title: "Piano"); piano.location = "Room B"
+        XCTAssertTrue(Benchmark.grade(test, events: [piano, yoga], message: nil, zone: zone).isEmpty)
+        XCTAssertFalse(Benchmark.grade(test, events: [piano, piano], message: nil, zone: zone).isEmpty)
+    }
+    func testNoEventRequiresExplanationAndRejectsHallucinatedEvent() throws {
+        let test = try fixture("cancelled_without_replacement")
+        XCTAssertFalse(Benchmark.grade(test, events: [], message: nil, zone: zone).isEmpty)
+        XCTAssertTrue(Benchmark.grade(test, events: [], message: "The meeting was cancelled.", zone: zone).isEmpty)
+        let other = try fixture("text_iso")
+        XCTAssertFalse(Benchmark.grade(test, events: [event(other.expect[0])], message: "Cancelled", zone: zone).isEmpty)
+    }
+    func testMissingImageFailsPreflightInsteadOfBecomingTextOnly() throws {
+        var suite = try suite(); suite.cases[0].image = "missing-fixture.png"
+        XCTAssertThrowsError(try Benchmark.validate(suite, folder: folder))
+    }
+    func testPreservesServedOpenAIModelAndTerraPricing() throws {
+        let response: [String: Any] = ["status": "completed", "model": "gpt-6.1-terra",
+            "output": [["type": "message", "content": [["type": "output_text", "text": "{\"events\":[],\"message\":\"No event\"}"]]]]]
+        let result = try EventExtractor.parse(response: JSONSerialization.data(withJSONObject: response), now: .now, timeZone: zone)
+        XCTAssertEqual(result.servedModel, "gpt-6.1-terra")
+        XCTAssertEqual(EventExtractorSettings(model: "gpt-6.1-terra").rates.input, 1)
+        XCTAssertEqual(EventExtractorSettings(model: "gpt-6.1-terra").rates.output, 5)
     }
 }

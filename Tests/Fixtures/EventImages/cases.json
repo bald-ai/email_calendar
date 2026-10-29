@@ -1,7 +1,11 @@
 {
   "now": "2026-10-12T14:00",
   "timeZone": "Europe/Prague",
-  "calendars": ["Personal", "Work", "Family"],
+  "calendars": [
+    "Personal",
+    "Work",
+    "Family"
+  ],
   "tiers": {
     "1": "Simple: one event, date and time stated plainly",
     "2": "Context: relative dates, durations, other time zones, several events, the one event among other dates",
@@ -9,60 +13,1283 @@
     "4": "App controls: repeating events, choosing a calendar, reminders"
   },
   "cases": [
-    {"tier": 1, "id": "email_dentist", "image": "email_dentist.png", "expect": [{"start": ["2026-10-15T09:40"]}]},
-    {"tier": 1, "id": "web_meetup", "image": "web_meetup.png", "expect": [{"start": ["2026-11-04T18:30"], "end": "2026-11-04T21:00"}]},
-    {"tier": 1, "id": "ticket_train", "image": "ticket_train.png", "expect": [{"start": ["2026-10-30T14:12"], "end": "2026-10-30T16:49"}]},
-    {"tier": 1, "id": "poster_concert", "image": "poster_concert.png", "note": "show, not doors; no year", "expect": [{"start": ["2026-11-13T20:00"]}]},
-    {"tier": 1, "id": "note_handwritten", "image": "note_handwritten.png", "expect": [{"start": ["2026-10-20T08:45"]}]},
-    {"tier": 1, "id": "invite_utc", "image": "invite_utc.png", "expect": [{"start": ["2026-11-05T10:00"], "end": "2026-11-05T11:00"}]},
-    {"tier": 1, "id": "web_deploy_overnight", "image": "web_deploy_overnight.png", "expect": [{"start": ["2026-10-31T23:00"], "end": "2026-11-01T02:00"}]},
-    {"tier": 1, "id": "web_restaurant_booking", "image": "web_restaurant_booking.png", "expect": [{"start": ["2026-10-17T19:00"]}]},
-    {"tier": 1, "id": "email_no_event", "image": "email_no_event.png", "expect": []},
-    {"tier": 1, "id": "text_lunch", "text": "lunch with Tom thursday 12:30 at Café Savoy", "expect": [{"start": ["2026-10-15T12:30"]}]},
-    {"tier": 1, "id": "text_relative", "text": "call mom in 2 days at 7pm", "expect": [{"start": ["2026-10-14T19:00"]}]},
-    {"tier": 1, "id": "text_czech_date", "text": "zubař 3.11. v 8:15", "expect": [{"start": ["2026-11-03T08:15"]}]},
-    {"tier": 1, "id": "text_iso", "text": "Board meeting 2026-11-12 09:00-10:30", "expect": [{"start": ["2026-11-12T09:00"], "end": "2026-11-12T10:30"}]},
-
-    {"tier": 2, "id": "chat_slack", "image": "chat_slack.png", "expect": [{"start": ["2026-10-13T15:00"], "end": "2026-10-13T15:45"}]},
-    {"tier": 2, "id": "email_flight", "image": "email_flight.png", "note": "arrival is London time", "expect": [{"start": ["2026-10-24T07:05"], "end": "2026-10-24T09:20"}]},
-    {"tier": 2, "id": "web_webinar_et", "image": "web_webinar_et.png", "note": "11:00 ET is 17:00 Prague", "expect": [{"start": ["2026-10-20T17:00"], "end": "2026-10-20T18:00"}]},
-    {"tier": 2, "id": "web_dst_et", "image": "web_dst_et.png", "note": "US still on EDT, Europe already on CET: 5 h, not 6", "expect": [{"start": ["2026-10-28T15:00"], "end": "2026-10-28T16:00"}]},
-    {"tier": 2, "id": "web_conference_schedule", "image": "web_conference_schedule.png", "expect": [
-      {"start": ["2026-11-07T09:30"], "end": "2026-11-07T10:15"},
-      {"start": ["2026-11-07T13:00"], "end": "2026-11-07T15:00"},
-      {"start": ["2026-11-08T16:00"], "end": "2026-11-08T17:00"}]},
-    {"tier": 2, "id": "web_festival_allday", "image": "web_festival_allday.png", "expect": [{"start": ["2026-10-21T00:00"], "end": "2026-10-26T00:00", "allDay": true}]},
-    {"tier": 2, "id": "email_noisy_dinner", "image": "email_noisy_dinner.png", "note": "ignore RSVP deadline, cancelled sync, quoted text", "expect": [{"start": ["2026-10-23T19:30"]}]},
-    {"tier": 2, "id": "email_reschedule_confirmed", "image": "email_reschedule_confirmed.png", "note": "Wednesday → Friday, same time", "expect": [{"start": ["2026-10-16T10:00"], "end": "2026-10-16T11:00"}]},
-    {"tier": 2, "id": "chat_group_plan", "image": "chat_group_plan.png", "note": "thu proposed, fri agreed; group is named 'Friday crew'", "expect": [{"start": ["2026-10-16T20:00"]}]},
-    {"tier": 2, "id": "ticket_chosen_show", "image": "ticket_chosen_show.png", "note": "three performances listed, ticket is for one", "expect": [{"start": ["2026-10-24T19:30"]}]},
-    {"tier": 2, "id": "text_two_weeks", "text": "dinner at Eska two weeks from this Friday, 7:30pm", "expect": [{"start": ["2026-10-30T19:30"]}]},
-    {"tier": 2, "id": "text_pt_midnight", "text": "launch call tomorrow 3pm PT", "note": "15:00 PDT is 00:00 the next day in Prague", "expect": [{"start": ["2026-10-14T00:00"]}]},
-    {"tier": 2, "id": "text_nyc_call", "text": "call with the NYC team thursday 9am New York time", "expect": [{"start": ["2026-10-15T15:00"]}]},
-    {"tier": 2, "id": "text_duration", "text": "coworking tomorrow from 1:30pm for 3 hours", "expect": [{"start": ["2026-10-13T13:30"], "end": "2026-10-13T16:30"}]},
-
-    {"tier": 3, "id": "email_thread_changed", "image": "email_thread_changed.png", "note": "Thursday 2pm, then moved to 4:30 'the same day' in a later reply", "expect": [{"start": ["2026-10-15T16:30"], "end": "2026-10-15T17:30"}]},
-    {"tier": 3, "id": "email_cancelled_then_new", "image": "email_cancelled_then_new.png", "note": "20 Oct is cancelled; only 22 Oct", "expect": [{"start": ["2026-10-22T10:00"], "end": "2026-10-22T13:00"}]},
-    {"tier": 3, "id": "email_forward_last_year", "image": "email_forward_last_year.png", "note": "forwarded 2025 dates are not the event", "expect": [{"start": ["2026-11-04T00:00"], "end": "2026-11-06T00:00", "allDay": true}]},
-    {"tier": 3, "id": "chat_time_correction", "image": "chat_time_correction.png", "note": "6 corrected to 7", "expect": [{"start": ["2026-10-12T19:00"]}]},
-    {"tier": 3, "id": "poster_past_year", "image": "poster_past_year.png", "note": "an old poster: keep 2025, do not 'fix' the year", "expect": [{"start": ["2025-11-15T20:00"]}]},
-    {"tier": 3, "id": "sms_haircut", "image": "sms_haircut.png", "note": "'next Friday' on a Monday is ambiguous", "warn": true, "expect": [{"start": ["2026-10-16T17:30", "2026-10-23T17:30"]}]},
-    {"tier": 3, "id": "email_weekday_conflict", "image": "email_weekday_conflict.png", "note": "says Monday 3 Nov, but it is a Tuesday", "warn": true, "expect": [{"start": ["2026-11-03T10:00", "2026-11-02T10:00"]}]},
-    {"tier": 3, "id": "email_ambiguous_date", "image": "email_ambiguous_date.png", "note": "11/06 from a US sender; June 11 is past", "warn": true, "expect": [{"start": ["2026-11-06T14:00"], "end": "2026-11-06T15:30"}]},
-    {"tier": 3, "id": "text_midnight", "text": "ticket sale opens at midnight on Friday", "note": "start or end of Friday? must be flagged", "warn": true, "expect": [{"start": ["2026-10-16T00:00", "2026-10-17T00:00"]}]},
-    {"tier": 3, "id": "text_next_week_not_this", "text": "standup moved to next week's wednesday 3pm (not this wednesday)", "expect": [{"start": ["2026-10-21T15:00"]}]},
-    {"tier": 4, "id": "text_repeat_weekly", "text": "Spanish course every Tuesday 18:00-19:30 from 20 Oct for 8 weeks", "expect": [{"start": ["2026-10-20T18:00"], "end": "2026-10-20T19:30", "rrule": ["FREQ=WEEKLY", "TU"], "rruleAny": ["COUNT=8", "UNTIL=2026120"]}]},
-    {"tier": 4, "id": "text_repeat_weekdays", "text": "team standup every weekday at 9:30, 15 min", "expect": [{"start": ["2026-10-13T09:30", "2026-10-12T09:30"], "end": "2026-10-13T09:45", "rrule": ["MO,TU,WE,TH,FR"]}]},
-    {"tier": 4, "id": "text_repeat_monthly", "text": "pay rent on the 1st of every month", "expect": [{"start": ["2026-11-01T00:00", "2026-11-01T09:00"], "rrule": ["FREQ=MONTHLY"]}]},
-    {"tier": 4, "id": "web_course_recurring", "image": "web_course_recurring.png", "expect": [{"start": ["2026-10-29T19:00"], "end": "2026-10-29T21:00", "rrule": ["FREQ=WEEKLY", "TH"], "rruleAny": ["COUNT=6", "UNTIL=2026120"]}]},
-    {"tier": 4, "id": "text_separate_days", "text": "gym next week mon wed fri 7am", "note": "three dates, not a recurrence", "expect": [
-      {"start": ["2026-10-19T07:00"], "once": true}, {"start": ["2026-10-21T07:00"], "once": true}, {"start": ["2026-10-23T07:00"], "once": true}]},
-    {"tier": 4, "id": "text_calendar_named", "text": "put sprint review on friday 10am in my Work calendar", "expect": [{"start": ["2026-10-16T10:00"], "calendar": "Work"}]},
-    {"tier": 4, "id": "text_reminder", "text": "dentist thursday 9:40, remind me 30 min before", "expect": [{"start": ["2026-10-15T09:40"], "alarm": 30}]},
-    {"tier": 4, "id": "text_everything", "text": "family dinner every sunday at 6pm in the Family calendar, alarm an hour before", "expect": [{"start": ["2026-10-18T18:00"], "rrule": ["FREQ=WEEKLY", "SU"], "calendar": "Family", "alarm": 60}]},
-    {"tier": 3, "id": "text_zone_not_given_abroad", "text": "kickoff call with Rachel from our Boston office thursday at 2pm, she'll send a Zoom link", "note": "no zone, but the organizer is in Boston: must be flagged", "warn": true, "expect": [{"start": ["2026-10-15T14:00", "2026-10-15T20:00"]}]},
-    {"tier": 3, "id": "text_cst_ambiguous", "text": "product launch thu 22 oct 9am CST", "note": "US Central or China: must be flagged", "warn": true, "expect": [{"start": ["2026-10-22T16:00", "2026-10-22T17:00", "2026-10-22T03:00"]}]},
-    {"tier": 3, "id": "text_dst_night", "text": "database maintenance sunday 25 oct 2:30am", "note": "clocks go back that night: 2:30 happens twice", "warn": true, "expect": [{"start": ["2026-10-25T02:30", "2026-10-25T01:30"]}]},
-    {"tier": 3, "id": "text_est_label", "text": "webinar thu 22 oct 3pm EST", "note": "EST in October is usually a mislabel for EDT; must be flagged", "warn": true, "expect": [{"start": ["2026-10-22T21:00", "2026-10-22T22:00"]}]}
-  ]
+    {
+      "tier": 1,
+      "id": "email_dentist",
+      "image": "email_dentist.png",
+      "expect": [
+        {
+          "start": [
+            "2026-10-15T09:40"
+          ],
+          "locationContains": [
+            "Korunní 48"
+          ],
+          "notesContains": [
+            "insurance"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "web_meetup",
+      "image": "web_meetup.png",
+      "expect": [
+        {
+          "start": [
+            "2026-11-04T18:30"
+          ],
+          "end": "2026-11-04T21:00",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "ticket_train",
+      "image": "ticket_train.png",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T14:12"
+          ],
+          "end": "2026-10-30T16:49",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "poster_concert",
+      "image": "poster_concert.png",
+      "note": "show, not doors; no year",
+      "expect": [
+        {
+          "start": [
+            "2026-11-13T20:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "note_handwritten",
+      "image": "note_handwritten.png",
+      "expect": [
+        {
+          "start": [
+            "2026-10-20T08:45"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "invite_utc",
+      "image": "invite_utc.png",
+      "expect": [
+        {
+          "start": [
+            "2026-11-05T10:00"
+          ],
+          "end": "2026-11-05T11:00",
+          "locationContains": [
+            "https://meet.example.com/abc-defg-hij"
+          ],
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "web_deploy_overnight",
+      "image": "web_deploy_overnight.png",
+      "expect": [
+        {
+          "start": [
+            "2026-10-31T23:00"
+          ],
+          "end": "2026-11-01T02:00",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "web_restaurant_booking",
+      "image": "web_restaurant_booking.png",
+      "expect": [
+        {
+          "start": [
+            "2026-10-17T19:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "email_no_event",
+      "image": "email_no_event.png",
+      "expect": []
+    },
+    {
+      "tier": 1,
+      "id": "text_lunch",
+      "text": "lunch with Tom thursday 12:30 at Café Savoy",
+      "expect": [
+        {
+          "start": [
+            "2026-10-15T12:30"
+          ],
+          "titleAny": [
+            "lunch",
+            "oběd"
+          ],
+          "locationContains": [
+            "Café Savoy"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "text_relative",
+      "text": "call mom in 2 days at 7pm",
+      "expect": [
+        {
+          "start": [
+            "2026-10-14T19:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "text_czech_date",
+      "text": "zubař 3.11. v 8:15",
+      "expect": [
+        {
+          "start": [
+            "2026-11-03T08:15"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 1,
+      "id": "text_iso",
+      "text": "Board meeting 2026-11-12 09:00-10:30",
+      "expect": [
+        {
+          "start": [
+            "2026-11-12T09:00"
+          ],
+          "end": "2026-11-12T10:30",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "chat_slack",
+      "image": "chat_slack.png",
+      "expect": [
+        {
+          "start": [
+            "2026-10-13T15:00"
+          ],
+          "end": "2026-10-13T15:45",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "email_flight",
+      "image": "email_flight.png",
+      "note": "arrival is London time",
+      "expect": [
+        {
+          "start": [
+            "2026-10-24T07:05"
+          ],
+          "end": "2026-10-24T09:20",
+          "notesContains": [
+            "QX7T2M"
+          ],
+          "sourceZone": "Europe/Prague",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "web_webinar_et",
+      "image": "web_webinar_et.png",
+      "note": "11:00 ET is 17:00 Prague",
+      "expect": [
+        {
+          "start": [
+            "2026-10-20T17:00"
+          ],
+          "end": "2026-10-20T18:00",
+          "sourceZone": "America/New_York",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "web_dst_et",
+      "image": "web_dst_et.png",
+      "note": "US still on EDT, Europe already on CET: 5 h, not 6",
+      "expect": [
+        {
+          "start": [
+            "2026-10-28T15:00"
+          ],
+          "end": "2026-10-28T16:00",
+          "sourceZone": "America/New_York",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "web_conference_schedule",
+      "image": "web_conference_schedule.png",
+      "expect": [
+        {
+          "start": [
+            "2026-11-07T09:30"
+          ],
+          "end": "2026-11-07T10:15",
+          "allDay": false
+        },
+        {
+          "start": [
+            "2026-11-07T13:00"
+          ],
+          "end": "2026-11-07T15:00",
+          "allDay": false
+        },
+        {
+          "start": [
+            "2026-11-08T16:00"
+          ],
+          "end": "2026-11-08T17:00",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "web_festival_allday",
+      "image": "web_festival_allday.png",
+      "expect": [
+        {
+          "start": [
+            "2026-10-21T00:00"
+          ],
+          "end": "2026-10-26T00:00",
+          "allDay": true
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "email_noisy_dinner",
+      "image": "email_noisy_dinner.png",
+      "note": "ignore RSVP deadline, cancelled sync, quoted text",
+      "expect": [
+        {
+          "start": [
+            "2026-10-23T19:30"
+          ],
+          "locationContains": [
+            "Lokál"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "email_reschedule_confirmed",
+      "image": "email_reschedule_confirmed.png",
+      "note": "Wednesday → Friday, same time",
+      "expect": [
+        {
+          "start": [
+            "2026-10-16T10:00"
+          ],
+          "end": "2026-10-16T11:00",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "chat_group_plan",
+      "image": "chat_group_plan.png",
+      "note": "thu proposed, fri agreed; group is named 'Friday crew'",
+      "expect": [
+        {
+          "start": [
+            "2026-10-16T20:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "ticket_chosen_show",
+      "image": "ticket_chosen_show.png",
+      "note": "three performances listed, ticket is for one",
+      "expect": [
+        {
+          "start": [
+            "2026-10-24T19:30"
+          ],
+          "end": "2026-10-24T22:30",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "text_two_weeks",
+      "text": "dinner at Eska two weeks from this Friday, 7:30pm",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T19:30"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "text_pt_midnight",
+      "text": "launch call tomorrow 3pm PT",
+      "note": "15:00 PDT is 00:00 the next day in Prague",
+      "expect": [
+        {
+          "start": [
+            "2026-10-14T00:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "text_nyc_call",
+      "text": "call with the NYC team thursday 9am New York time",
+      "expect": [
+        {
+          "start": [
+            "2026-10-15T15:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "text_duration",
+      "text": "coworking tomorrow from 1:30pm for 3 hours",
+      "expect": [
+        {
+          "start": [
+            "2026-10-13T13:30"
+          ],
+          "end": "2026-10-13T16:30",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "email_thread_changed",
+      "image": "email_thread_changed.png",
+      "note": "Thursday 2pm, then moved to 4:30 'the same day' in a later reply",
+      "expect": [
+        {
+          "start": [
+            "2026-10-15T16:30"
+          ],
+          "end": "2026-10-15T17:30",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "email_cancelled_then_new",
+      "image": "email_cancelled_then_new.png",
+      "note": "20 Oct is cancelled; only 22 Oct",
+      "expect": [
+        {
+          "start": [
+            "2026-10-22T10:00"
+          ],
+          "end": "2026-10-22T13:00",
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "email_forward_last_year",
+      "image": "email_forward_last_year.png",
+      "note": "forwarded 2025 dates are not the event",
+      "expect": [
+        {
+          "start": [
+            "2026-11-04T00:00"
+          ],
+          "end": "2026-11-06T00:00",
+          "allDay": true
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "chat_time_correction",
+      "image": "chat_time_correction.png",
+      "note": "6 corrected to 7",
+      "expect": [
+        {
+          "start": [
+            "2026-10-12T19:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "poster_past_year",
+      "image": "poster_past_year.png",
+      "note": "an old poster: keep 2025, do not 'fix' the year",
+      "expect": [
+        {
+          "start": [
+            "2025-11-15T20:00"
+          ],
+          "warningAny": [
+            "past"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "sms_haircut",
+      "image": "sms_haircut.png",
+      "note": "'next Friday' on a Monday is ambiguous",
+      "warn": true,
+      "expect": [
+        {
+          "start": [
+            "2026-10-16T17:30"
+          ],
+          "warningAny": [
+            "Friday",
+            "October",
+            "16",
+            "23"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "email_weekday_conflict",
+      "image": "email_weekday_conflict.png",
+      "note": "says Monday 3 Nov, but it is a Tuesday",
+      "warn": true,
+      "expect": [
+        {
+          "start": [
+            "2026-11-03T10:00"
+          ],
+          "end": "2026-11-03T12:00",
+          "warningAny": [
+            "Tuesday",
+            "weekday",
+            "Monday"
+          ],
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "email_ambiguous_date",
+      "image": "email_ambiguous_date.png",
+      "note": "11/06 from a US sender; June 11 is past",
+      "warn": true,
+      "expect": [
+        {
+          "start": [
+            "2026-11-06T14:00"
+          ],
+          "end": "2026-11-06T15:30",
+          "warningAny": [
+            "ambiguous",
+            "June",
+            "November",
+            "11/06",
+            "format"
+          ],
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "text_midnight",
+      "text": "ticket sale opens at midnight on Friday",
+      "note": "start or end of Friday? must be flagged",
+      "warn": true,
+      "expect": [
+        {
+          "start": [
+            "2026-10-16T00:00",
+            "2026-10-17T00:00"
+          ],
+          "warningAny": [
+            "midnight",
+            "Friday",
+            "Saturday"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "text_next_week_not_this",
+      "text": "standup moved to next week's wednesday 3pm (not this wednesday)",
+      "expect": [
+        {
+          "start": [
+            "2026-10-21T15:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "text_repeat_weekly",
+      "text": "Spanish course every Tuesday 18:00-19:30 from 20 Oct for 8 weeks",
+      "expect": [
+        {
+          "start": [
+            "2026-10-20T18:00"
+          ],
+          "end": "2026-10-20T19:30",
+          "rrule": [
+            "FREQ=WEEKLY",
+            "BYDAY=TU"
+          ],
+          "rruleAny": [
+            "COUNT=8",
+            "UNTIL=20261208",
+            "UNTIL=20261208T170000Z",
+            "UNTIL=20261208T225959Z"
+          ],
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "text_repeat_weekdays",
+      "text": "team standup every weekday at 9:30, 15 min",
+      "expect": [
+        {
+          "start": [
+            "2026-10-13T09:30"
+          ],
+          "end": "2026-10-13T09:45",
+          "rrule": [
+            "FREQ=WEEKLY",
+            "BYDAY=MO,TU,WE,TH,FR"
+          ],
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "text_repeat_monthly",
+      "text": "pay rent on the 1st of every month",
+      "expect": [
+        {
+          "start": [
+            "2026-11-01T00:00"
+          ],
+          "rrule": [
+            "FREQ=MONTHLY",
+            "BYMONTHDAY=1"
+          ],
+          "allDay": true,
+          "end": "2026-11-02T00:00"
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "web_course_recurring",
+      "image": "web_course_recurring.png",
+      "expect": [
+        {
+          "start": [
+            "2026-10-29T19:00"
+          ],
+          "end": "2026-10-29T21:00",
+          "rrule": [
+            "FREQ=WEEKLY",
+            "BYDAY=TH"
+          ],
+          "rruleAny": [
+            "COUNT=6",
+            "UNTIL=20261203",
+            "UNTIL=20261203T180000Z",
+            "UNTIL=20261203T225959Z"
+          ],
+          "allDay": false
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "text_separate_days",
+      "text": "gym next week mon wed fri 7am",
+      "note": "three dates, not a recurrence",
+      "expect": [
+        {
+          "start": [
+            "2026-10-19T07:00"
+          ],
+          "once": true,
+          "allDay": false,
+          "durationMinutes": 60
+        },
+        {
+          "start": [
+            "2026-10-21T07:00"
+          ],
+          "once": true,
+          "allDay": false,
+          "durationMinutes": 60
+        },
+        {
+          "start": [
+            "2026-10-23T07:00"
+          ],
+          "once": true,
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "text_calendar_named",
+      "text": "put sprint review on friday 10am in my Work calendar",
+      "expect": [
+        {
+          "start": [
+            "2026-10-16T10:00"
+          ],
+          "calendar": "Work",
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "text_reminder",
+      "text": "dentist thursday 9:40, remind me 30 min before",
+      "expect": [
+        {
+          "start": [
+            "2026-10-15T09:40"
+          ],
+          "alarm": 30,
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "text_everything",
+      "text": "family dinner every sunday at 6pm in the Family calendar, alarm an hour before",
+      "expect": [
+        {
+          "start": [
+            "2026-10-18T18:00"
+          ],
+          "rrule": [
+            "FREQ=WEEKLY",
+            "BYDAY=SU"
+          ],
+          "calendar": "Family",
+          "alarm": 60,
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "text_zone_not_given_abroad",
+      "text": "kickoff call with Rachel from our Boston office thursday at 2pm, she'll send a Zoom link",
+      "note": "no zone, but the organizer is in Boston: must be flagged",
+      "warn": true,
+      "expect": [
+        {
+          "start": [
+            "2026-10-15T14:00"
+          ],
+          "warningAny": [
+            "zone",
+            "Boston",
+            "Eastern"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "text_cst_ambiguous",
+      "text": "product launch thu 22 oct 9am CST",
+      "note": "US Central or China: must be flagged",
+      "warn": true,
+      "expect": [
+        {
+          "start": [
+            "2026-10-22T16:00",
+            "2026-10-22T17:00",
+            "2026-10-22T03:00"
+          ],
+          "warningAny": [
+            "China",
+            "Central",
+            "CST"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "text_dst_night",
+      "text": "database maintenance sunday 25 oct 2:30am",
+      "note": "clocks go back that night: 2:30 happens twice",
+      "warn": true,
+      "expect": [
+        {
+          "start": [
+            "2026-10-25T02:30"
+          ],
+          "warningAny": [
+            "clock",
+            "daylight",
+            "twice",
+            "ambiguous"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "text_est_label",
+      "text": "webinar thu 22 oct 3pm EST",
+      "note": "EST in October is usually a mislabel for EDT; must be flagged",
+      "warn": true,
+      "expect": [
+        {
+          "start": [
+            "2026-10-22T21:00",
+            "2026-10-22T22:00"
+          ],
+          "warningAny": [
+            "EST",
+            "EDT",
+            "daylight"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "mixed_screenshot_calendar_alarm",
+      "text": "Use the appointment in this screenshot, put it in Work, and remind me 15 minutes before.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-15T09:40"
+          ],
+          "allDay": false,
+          "durationMinutes": 60,
+          "calendar": "Work",
+          "alarm": 15,
+          "locationContains": [
+            "Korunní 48"
+          ]
+        }
+      ],
+      "image": "email_dentist.png"
+    },
+    {
+      "tier": 4,
+      "id": "mixed_select_one_session",
+      "text": "Only add the Core ML workshop, not the keynote or closing panel.",
+      "expect": [
+        {
+          "start": [
+            "2026-11-07T13:00"
+          ],
+          "allDay": false,
+          "end": "2026-11-07T15:00",
+          "titleAny": [
+            "Core ML",
+            "ML"
+          ],
+          "locationContains": [
+            "B2"
+          ]
+        }
+      ],
+      "image": "web_conference_schedule.png"
+    },
+    {
+      "tier": 4,
+      "id": "mixed_explicit_correction",
+      "text": "The appointment in the screenshot has moved to 16 October 2026 at 11:20. Same address; add only the new appointment.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-16T11:20"
+          ],
+          "allDay": false,
+          "durationMinutes": 60,
+          "locationContains": [
+            "Korunní 48"
+          ]
+        }
+      ],
+      "image": "email_dentist.png"
+    },
+    {
+      "tier": 4,
+      "id": "multi_two_bookings",
+      "text": "Add both bookings.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-15T09:40"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        },
+        {
+          "start": [
+            "2026-10-17T19:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ],
+      "images": [
+        "email_dentist.png",
+        "web_restaurant_booking.png"
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "multi_duplicate_screenshot",
+      "text": "These are two copies of the same booking. Add it once.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-15T09:40"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ],
+      "images": [
+        "email_dentist.png",
+        "email_dentist.png"
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "multi_event_and_noise",
+      "text": "Add the appointment; the account email is only background.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-15T09:40"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ],
+      "images": [
+        "email_no_event.png",
+        "email_dentist.png"
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "czech_calendar_reminder",
+      "text": "Zubař 30. 10. 2026 v 8:15 na 30 minut, Korunní 48. Dej to do kalendáře Personal a připomeň mi to 15 minut předem.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T08:15"
+          ],
+          "allDay": false,
+          "end": "2026-10-30T08:45",
+          "calendar": "Personal",
+          "alarm": 15,
+          "locationContains": [
+            "Korunní 48"
+          ],
+          "titleAny": [
+            "zubař",
+            "dentist"
+          ]
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "czech_last_correction",
+      "text": "Oběd s Janou 30. 10. 2026 ve 12:00 v Esce. Oprava: až ve 13:30, na hodinu. Jen ten opravený čas.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T13:30"
+          ],
+          "allDay": false,
+          "end": "2026-10-30T14:30",
+          "locationContains": [
+            "Eska"
+          ]
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "id": "cancelled_without_replacement",
+      "text": "The design review on 30 October 2026 at 10:00 is cancelled. No replacement is planned. There is nothing to add.",
+      "expect": []
+    },
+    {
+      "tier": 3,
+      "id": "no_event_receipt",
+      "text": "Payment received 29 October 2026 at 15:42. Invoice paid in full. This is a receipt, not an appointment.",
+      "expect": []
+    },
+    {
+      "tier": 3,
+      "id": "no_event_missing_date",
+      "text": "Coffee with Jana sometime. We have not picked a date or time. Do not invent one; nothing to add yet.",
+      "expect": []
+    },
+    {
+      "tier": 3,
+      "id": "tentative_plan",
+      "text": "Tentative: dinner at Eska on 30 October 2026 at 19:00 for 90 minutes. Jana has not confirmed; flag that.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T19:00"
+          ],
+          "allDay": false,
+          "end": "2026-10-30T20:30",
+          "warningAny": [
+            "tentative",
+            "confirm",
+            "propos"
+          ]
+        }
+      ],
+      "warn": true
+    },
+    {
+      "tier": 4,
+      "id": "unknown_calendar",
+      "text": "Review on 30 October 2026 at 10:00 for 30 minutes in my Travel calendar. If that calendar is unavailable, leave the calendar unset.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T10:00"
+          ],
+          "allDay": false,
+          "end": "2026-10-30T10:30"
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "per_case_calendar_names",
+      "text": "Dentist 30 October 2026 at 09:00. Put it in Lékaři, with a reminder at the start.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T09:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60,
+          "calendar": "Lékaři",
+          "alarm": 0
+        }
+      ],
+      "calendars": [
+        "Osobní",
+        "Lékaři",
+        "Práce"
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "all_day_range_alarm",
+      "text": "Holiday 30 October through 2 November 2026, all day, in Family. Remind me 30 minutes before.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T00:00"
+          ],
+          "end": "2026-11-03T00:00",
+          "allDay": true,
+          "calendar": "Family",
+          "alarm": 30
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "weekly_combined_controls",
+      "text": "Dinner every Friday 18:30–19:30 starting 30 October 2026, exactly 3 occurrences, in Personal. Remind me 10 minutes before.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T18:30"
+          ],
+          "allDay": false,
+          "end": "2026-10-30T19:30",
+          "rrule": [
+            "FREQ=WEEKLY",
+            "BYDAY=FR",
+            "COUNT=3"
+          ],
+          "calendar": "Personal",
+          "alarm": 10
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "biweekly_count",
+      "text": "Physio every other Monday 08:00–08:30 from 2 November 2026, exactly 4 appointments.",
+      "expect": [
+        {
+          "start": [
+            "2026-11-02T08:00"
+          ],
+          "allDay": false,
+          "end": "2026-11-02T08:30",
+          "rrule": [
+            "FREQ=WEEKLY",
+            "INTERVAL=2",
+            "BYDAY=MO",
+            "COUNT=4"
+          ]
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "year_boundary_relative",
+      "text": "Call mom tomorrow at noon.",
+      "expect": [
+        {
+          "start": [
+            "2027-01-01T12:00"
+          ],
+          "allDay": false,
+          "durationMinutes": 60
+        }
+      ],
+      "now": "2026-12-31T23:30"
+    },
+    {
+      "tier": 2,
+      "id": "leap_day_relative",
+      "text": "Lunch tomorrow at 12:00 for 30 minutes.",
+      "expect": [
+        {
+          "start": [
+            "2028-02-29T12:00"
+          ],
+          "allDay": false,
+          "end": "2028-02-29T12:30"
+        }
+      ],
+      "now": "2028-02-28T14:00"
+    },
+    {
+      "tier": 2,
+      "id": "travel_user_timezone",
+      "text": "Call tomorrow at 09:00 New York time for 30 minutes.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T22:00"
+          ],
+          "allDay": false,
+          "end": "2026-10-30T22:30",
+          "sourceZone": "America/New_York"
+        }
+      ],
+      "now": "2026-10-29T14:00",
+      "timeZone": "Asia/Tokyo"
+    },
+    {
+      "tier": 2,
+      "id": "same_start_distinct_events",
+      "text": "On 30 October 2026, add Yoga in Studio A 18:00–19:00 and Piano in Room B 18:00–18:30. Keep both even though they overlap.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T18:00"
+          ],
+          "allDay": false,
+          "end": "2026-10-30T19:00",
+          "titleAny": [
+            "Yoga"
+          ],
+          "locationContains": [
+            "Studio A"
+          ]
+        },
+        {
+          "start": [
+            "2026-10-30T18:00"
+          ],
+          "allDay": false,
+          "end": "2026-10-30T18:30",
+          "titleAny": [
+            "Piano"
+          ],
+          "locationContains": [
+            "Room B"
+          ]
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "midnight_short_event",
+      "text": "Deployment check starts at 00:00 on 30 October 2026 and lasts 5 minutes. Remind me at the start.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T00:00"
+          ],
+          "allDay": false,
+          "end": "2026-10-30T00:05",
+          "alarm": 0
+        }
+      ]
+    },
+    {
+      "tier": 2,
+      "id": "meeting_link_notes",
+      "text": "Atlas review on 30 October 2026 10:00–10:45. Join https://meet.example.com/atlas-review . Bring the budget spreadsheet; booking code AX42.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T10:00"
+          ],
+          "allDay": false,
+          "end": "2026-10-30T10:45",
+          "titleAny": [
+            "Atlas"
+          ],
+          "locationContains": [
+            "https://meet.example.com/atlas-review"
+          ],
+          "notesContains": [
+            "AX42",
+            "budget"
+          ]
+        }
+      ]
+    },
+    {
+      "tier": 4,
+      "id": "explicit_no_alarm",
+      "text": "Dentist 30 October 2026 at 09:40. No reminder, no repeat. The email says arrive 10 minutes early, but the appointment starts at 09:40.",
+      "expect": [
+        {
+          "start": [
+            "2026-10-30T09:40"
+          ],
+          "allDay": false,
+          "durationMinutes": 60,
+          "once": true
+        }
+      ]
+    }
+  ],
+  "version": "2026-10-29-v2"
 }

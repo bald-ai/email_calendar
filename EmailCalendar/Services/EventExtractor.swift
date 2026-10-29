@@ -28,6 +28,7 @@ public struct EventExtractorSettings: Sendable, Equatable {
         case "gpt-6-luna": (0.1, 0.01, 0.5)
         case "gpt-5.6-luna": (0.2, 0.02, 1.2)
         case "gpt-6-sol": (2, 0.2, 10)
+        case "gpt-6.1-terra": (1, 0.05, 5)
         case "claude-haiku-5-5": (0.1, 0.01, 0.5)
         case "claude-sonnet-5-5": (2, 0.2, 10)
         default: (2, 0.1, 10)   // gpt-6.1-sol
@@ -410,7 +411,7 @@ public struct EventExtractor: Sendable {
         let events = raw.events.compactMap { resolve($0, now: now, timeZone: timeZone, calendars: calendars) }
         guard events.count == raw.events.count else { throw EventExtractorError.invalidOutput }
         return EventExtraction(events: events,
-                               message: raw.message, usage: parsedUsage, seconds: 0)
+                               message: raw.message, usage: parsedUsage, seconds: 0, servedModel: root["model"] as? String)
     }
 
     /// Dates are computed here, not by the model, so time zones and weekdays are checked by code.

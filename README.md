@@ -7,7 +7,7 @@ A native macOS 15+ app written in Swift 6, SwiftUI and AppKit. Mail is backed by
 **Highlights**
 
 - **AI event extraction:** paste a screenshot or a sentence, and the app proposes calendar events with warnings for anything doubtful. Time-zone and weekday checks are done in code, not by the model. [Details and benchmark ↓](#ai-event-extraction-and-benchmark)
-- **46-case tiered benchmark** for that feature: simple → context → traps → app controls, run against several models for accuracy, latency and cost.
+- **73-case tiered benchmark** for that feature: simple → context → traps → app controls, including multiple screenshots and text corrections, with repeated runs for accuracy, latency and cost.
 
 ## Run on your Mac
 
@@ -43,7 +43,7 @@ For normal use, build a signed app, move it to `/Applications`, and launch it th
 - Calendar visibility, Day/Week/Month views, expanded recurring events, event creation/editing/deletion, this-event/all-events scope, invitation responses and detected video links.
 - A nonactivating, full-width `NSPanel` over Spaces/full-screen apps, selected by mouse display, with tap/hold hotkey, Escape/outside-click/Space dismissal, Reduce Motion, resizing, now-line, live next-event anchor, week navigation and quick event creation.
 - **Quick alarms** in the overlay (`A`): one-click 5m–1h presets, or type `10m`, `1h30`, `14:30`, `7pm`, with an optional label. Clicking an empty slot also offers **Alarm** at that time. A due alarm takes over every screen with a flashing red window and a looping beep until you **Snooze** (5 minutes; `S` or Space) or **Stop** (Return or Escape). Alarms survive relaunches; a missed one rings as soon as the app runs again. While an alarm is less than four hours away the Mac doesn't idle-sleep (closing the lid still sleeps it, and the sound follows the system volume). Pending alarms show in the overlay header and the menu bar, where they can be cancelled.
-- **AI add** in the overlay (`I`, or `⌘V` with a screenshot or text on the clipboard): describe an event, paste or drop a screenshot, or upload an image, and Claude Haiku 5.5 (high effort) proposes events, with GPT-6.1 Sol (normal speed, medium reasoning) as the automatic backup if a call fails. `EventAssistant.preferred` swaps the order. Each one shows the weekday, date, time, length and how far away it is, with editable date pickers and warnings for anything doubtful. Time-zone conversion and weekday checks are done in code, not by the model. The AI can also set what the editor offers: a real repeat rule ("every Tuesday for 8 weeks", "weekdays"), the calendar you name, and an alarm when you ask to be reminded; each card shows these as menus you can change. Events already in your calendar at that time are flagged: red for a likely duplicate, orange for an overlap. **Add** saves it to your primary calendar; **Add + alarm** also rings 10 minutes before (09:00 for all-day events). Keys come from Preferences (Keychain), `ANTHROPIC_API_KEY` / `ANTHROPIC_WORKSPACE_ID` / `OPENAI_API_KEY` in `Config/Secrets.xcconfig`, or the environment.
+- **AI add** in the overlay (`I`, or `⌘V` with a screenshot or text on the clipboard): describe an event, paste or drop a screenshot, or upload an image, and GPT-6.1 Terra (normal speed, low reasoning) proposes events, with Claude Haiku 5.5 (medium effort) as the automatic backup if a call fails. `EventAssistant.preferred` swaps the order. Each one shows the weekday, date, time, length and how far away it is, with editable date pickers and warnings for anything doubtful. Time-zone conversion and weekday checks are done in code, not by the model. The AI can also set what the editor offers: a real repeat rule ("every Tuesday for 8 weeks", "weekdays"), the calendar you name, and an alarm when you ask to be reminded; each card shows these as menus you can change. Events already in your calendar at that time are flagged: red for a likely duplicate, orange for an overlap. **Add** saves it to your primary calendar; **Add + alarm** also rings 10 minutes before (09:00 for all-day events). Keys come from Preferences (Keychain), `ANTHROPIC_API_KEY` / `ANTHROPIC_WORKSPACE_ID` / `OPENAI_API_KEY` in `Config/Secrets.xcconfig`, or the environment.
 - Sandboxed, ephemeral HTML rendering with JavaScript, forms, frames and remote resources blocked; remote images can be allowed per sender.
 
 **Undo Send**: Send saves the complete email as a Gmail draft and starts a 30-second countdown ("Sending in 24s · Subject · Undo") shown over mail and calendar; several emails count down independently, and clicking one opens a read-only preview. Undo reopens the draft for editing. At zero Gmail sends that exact draft, with the same duplicate protection as before, and "Sent" links to the sent copy. Quit waits for pending emails (with Send now and Undo still available). Mail that was due while the Mac slept or the app was closed is never sent late without review: it stays at the top of the Imbox with Review, Retry (a fresh countdown) and Move to Drafts. A send interrupted after reaching Gmail is looked up in Sent instead of being retried.
@@ -93,9 +93,9 @@ Tests use temporary databases and mock URLSession transports; they do not touch 
 
 **What it does:** in the overlay, press `I` or paste a screenshot. The model proposes events (date, time, length, repeat rule, calendar, reminder), and the app shows them as editable cards. Anything doubtful gets a warning instead of a silent guess: a changed plan, an ambiguous date, an unconfirmed time zone, a likely duplicate. Time-zone conversion, weekday checks and clock-change nights are handled in code; the model only reports what the source says.
 
-**Results** (12 October 2026, 38 cases in tiers 1–3, each run 3 times = 114 answers per setup; selected rows):
+**Historical results, not scores on the current suite** (12 October 2026, 38 cases in tiers 1–3, each run 3 times = 114 answers per setup; selected rows):
 
-| Model · reasoning | Simple | Context | Traps | Overall | Median | $ / 1000 events |
+| Model · reasoning | Simple | Context | Traps | Overall | Median | $ / 1000 requests |
 | --- | --- | --- | --- | --- | --- | --- |
 | Haiku 5.5 · high | 100% | 100% | 100% | 114/114 | 3.4 s | $0.53 |
 | Sol 6.1 · medium | 100% | 100% | 100% | 114/114 | 4.3 s | $4.78 |
@@ -105,16 +105,18 @@ Tests use temporary databases and mock URLSession transports; they do not touch 
 
 - Every setup passed the simple and context tiers; the traps tier is what separates them.
 - The dangerous misses were wrong dates or times with no warning: a meeting moved "to 4:30 the same day" put on today instead of Thursday, and a UTC invite read as Prague time.
-- Haiku 5.5 high and Sol 6.1 made no mistakes across all rounds. Haiku is about 9× cheaper and faster, so it is the default, with Sol as the automatic backup.
+- Haiku 5.5 high and Sol 6.1 made no mistakes across those historical rounds. That originally led to Haiku high as the default. After the expanded October 29 comparison, the app uses Terra 6.1 low first and Haiku 5.5 medium as backup; see the [current results](Dev/benchmark-results/2026-10-29-v2/README.md).
 - After adding tier 4 (app controls, 8 cases), both scored 100% on it.
 
 Small samples: a perfect score over 114 answers does not prove a model never errs. Costs are estimates from published prices.
 
-**Running it:** the live benchmark is skipped by default. It sends the 46 cases in `Tests/Fixtures/EventImages` (fictional screenshots of emails, event pages, chats, tickets and posters, plus typed text, regenerated with `python3 scripts/make_event_fixtures.py`) and compares the results with `cases.json`. Tier 1 is simple, tier 2 needs context (relative dates, durations, time zones, several events), tier 3 is traps (changed plans, cancellations, wrong weekdays, ambiguity that must be flagged), tier 4 is app controls (repeat rules, a named calendar, reminders). Models named `claude-…` use the Anthropic API (`ANTHROPIC_API_KEY`, plus `ANTHROPIC_WORKSPACE_ID` for keys not scoped to a workspace):
+**Current suite:** version `2026-10-29-v2` has 73 cases. The previous fixture file actually contained 49 cases despite the old 46-case label. The revision adds 24 cases and tightens the existing expectations. See [the benchmark protocol](Dev/event-extraction-benchmark.md) for coverage, scoring, limitations and the low → medium → high stopping rule.
+
+**Running it:** the live benchmark is skipped by default. It sends fictional screenshots and typed text from `Tests/Fixtures/EventImages`, using the production prompt and parser, and compares the resulting event proposals with `cases.json`. Screenshot fixtures can be regenerated with `python3 scripts/make_event_fixtures.py`. Tier 1 is simple, tier 2 needs context, tier 3 contains traps, and tier 4 covers app controls and combined input. Models named `claude-…` use the Anthropic API (`ANTHROPIC_API_KEY`, plus `ANTHROPIC_WORKSPACE_ID` for keys not scoped to a workspace). Set the selected provider's key in the environment, then choose a model explicitly:
 
 ```sh
-EC_LIVE_AI=1 OPENAI_API_KEY=sk-… EC_AI_MODEL=gpt-6.1-sol EC_AI_REASONING=medium EC_AI_REPEATS=3 \
-  EC_AI_JSON=results/gpt-6.1-sol-medium.json swift test --filter LiveEventExtraction
+EC_LIVE_AI=1 EC_AI_MODEL=MODEL_ID EC_AI_REASONING=low EC_AI_REPEATS=3 EC_AI_PARALLEL=1 \
+  EC_AI_JSON=results/MODEL_ID-low.json swift test --filter LiveEventExtraction
 python3 scripts/summarize_event_benchmark.py results
 ```
 

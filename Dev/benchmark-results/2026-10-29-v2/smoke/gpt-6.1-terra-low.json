@@ -1,0 +1,49 @@
+{
+  "caseIDs" : [
+    "text_iso"
+  ],
+  "createdAt" : "2026-10-29T17:31:34Z",
+  "fingerprint" : "e22796b2ccb64126daf891ef13b8137baef74de535fd541af500a4a5136c4d34",
+  "model" : "gpt-6.1-terra",
+  "outcomes" : [
+    {
+      "actual" : [
+        {
+          "allDay" : false,
+          "end" : "2026-11-12T09:30:00Z",
+          "location" : "",
+          "notes" : "",
+          "recurrence" : [
+
+          ],
+          "sourceZone" : "Europe\/Prague",
+          "start" : "2026-11-12T08:00:00Z",
+          "title" : "Board meeting",
+          "warnings" : [
+
+          ]
+        }
+      ],
+      "attempt" : 1,
+      "cost" : 0.002216,
+      "detail" : "Board meeting Nov 12 09:00–Nov 12 10:30",
+      "id" : "text_iso",
+      "passed" : true,
+      "seconds" : 4.003988981246948,
+      "servedModel" : "gpt-6.1-terra",
+      "tier" : 1,
+      "usage" : {
+        "cached" : 0,
+        "input" : 1621,
+        "output" : 119,
+        "reasoning" : 0
+      }
+    }
+  ],
+  "parallelism" : 1,
+  "reasoning" : "low",
+  "repeats" : 1,
+  "schemaVersion" : 2,
+  "serviceTier" : "default",
+  "suiteVersion" : "2026-10-29-v2"
+}

@@ -70,24 +70,22 @@ final class EventAssistant {
 
     enum Provider { case anthropic, openAI }
 
-    /// Claude Haiku 5.5 at high effort matched GPT-6.1 Sol on every case of the tiered benchmark,
-    /// about a second faster and ~9× cheaper. Set this to `.openAI` to put Sol first;
-    /// the other provider is always the backup when a call fails or has no key.
-    static let preferred: Provider = .anthropic
-    static let haiku = EventExtractorSettings(model: "claude-haiku-5-5", reasoning: "high")
-    static let sol = EventExtractorSettings(model: "gpt-6.1-sol", reasoning: "medium", serviceTier: "default")
+    /// Selected after the October 29 benchmark: Terra low first, Haiku medium on failure.
+    static let preferred: Provider = .openAI
+    static let haiku = EventExtractorSettings(model: "claude-haiku-5-5", reasoning: "medium")
+    static let terra = EventExtractorSettings(model: "gpt-6.1-terra", reasoning: "low", serviceTier: "default")
 
     /// Extractors to try, in order, for the providers that have a key.
     static func extractors() -> [EventExtractor] {
         let anthropic = Credential.anthropicKey.value.map {
             EventExtractor(apiKey: $0, settings: haiku, anthropicWorkspaceID: Credential.anthropicWorkspace.value)
         }
-        let openAI = Credential.openAIKey.value.map { EventExtractor(apiKey: $0, settings: sol) }
+        let openAI = Credential.openAIKey.value.map { EventExtractor(apiKey: $0, settings: terra) }
         return (preferred == .anthropic ? [anthropic, openAI] : [openAI, anthropic]).compactMap { $0 }
     }
 
     static var modelSummary: String {
-        let names = [Provider.anthropic: "Claude Haiku 5.5 · high effort", .openAI: "GPT-6.1 Sol · medium reasoning"]
+        let names = [Provider.anthropic: "Claude Haiku 5.5 · medium effort", .openAI: "GPT-6.1 Terra · low reasoning"]
         return "\(names[preferred]!) · backup: \(names[preferred == .anthropic ? .openAI : .anthropic]!)"
     }
 

@@ -1,0 +1,49 @@
+{
+  "caseIDs" : [
+    "text_iso"
+  ],
+  "createdAt" : "2026-10-29T17:31:36Z",
+  "fingerprint" : "e22796b2ccb64126daf891ef13b8137baef74de535fd541af500a4a5136c4d34",
+  "model" : "claude-haiku-5-5",
+  "outcomes" : [
+    {
+      "actual" : [
+        {
+          "allDay" : false,
+          "end" : "2026-11-12T09:30:00Z",
+          "location" : "",
+          "notes" : "",
+          "recurrence" : [
+
+          ],
+          "sourceZone" : "Europe\/Prague",
+          "start" : "2026-11-12T08:00:00Z",
+          "title" : "Board meeting",
+          "warnings" : [
+
+          ]
+        }
+      ],
+      "attempt" : 1,
+      "cost" : 0.000392,
+      "detail" : "Board meeting Nov 12 09:00–Nov 12 10:30",
+      "id" : "text_iso",
+      "passed" : true,
+      "seconds" : 5.161978006362915,
+      "servedModel" : "claude-haiku-5-5",
+      "tier" : 1,
+      "usage" : {
+        "cached" : 0,
+        "input" : 3050,
+        "output" : 174,
+        "reasoning" : 0
+      }
+    }
+  ],
+  "parallelism" : 1,
+  "reasoning" : "low",
+  "repeats" : 1,
+  "schemaVersion" : 2,
+  "serviceTier" : "default",
+  "suiteVersion" : "2026-10-29-v2"
+}

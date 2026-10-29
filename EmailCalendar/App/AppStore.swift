@@ -525,7 +525,7 @@ final class AppStore {
         closeThread()
     }
 
-    /// Power Through's "Mark all as seen": the given threads move to Previously Seen, then back to the Imbox.
+    /// "Mark all as seen" from the Imbox or Power Through: the given threads move to Previously Seen, then back to the Imbox.
     func markAllSeen(_ threads: [MailThread]) async {
         guard let mail, let account else { return }
         let seenAt = Date.now
